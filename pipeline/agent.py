@@ -16,7 +16,14 @@ from pathlib import Path
 
 from pipeline.dialog import ConversationBrain, compose_message
 from pipeline.interfaces import INTENT_OVERRIDE, SharedSessionState
-from pipeline.reranker import IdentityReranker, LLMReranker, LocalReranker
+from pipeline.reranker import (
+    IdentityReranker,
+    LLMReranker,
+    LocalReranker,
+    PairwiseLLMReranker,
+    PairwiseTop3LLMReranker,
+    TargetedLLMReranker,
+)
 from pipeline.retriever import HybridRetriever
 from pipeline.router import erase_superseded, route
 
@@ -280,6 +287,18 @@ class PipelineAgent:
         self._position = {asin: i for i, asin in enumerate(self.retriever.asins)}
         if reranker == "llm":
             self.reranker = LLMReranker(
+                self.retriever, model=ranking_model or "claude-opus-5"
+            )
+        elif reranker == "targeted_llm":
+            self.reranker = TargetedLLMReranker(
+                self.retriever, model=ranking_model or "claude-opus-5"
+            )
+        elif reranker == "pairwise_llm":
+            self.reranker = PairwiseLLMReranker(
+                self.retriever, model=ranking_model or "claude-opus-5"
+            )
+        elif reranker == "pairwise_top3_llm":
+            self.reranker = PairwiseTop3LLMReranker(
                 self.retriever, model=ranking_model or "claude-opus-5"
             )
         elif reranker == "identity":

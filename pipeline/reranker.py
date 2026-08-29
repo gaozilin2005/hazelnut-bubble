@@ -187,6 +187,319 @@ class LLMReranker:
         return [(asin, float(len(order) - i)) for i, asin in enumerate(order)]
 
 
+class TargetedLLMReranker:
+    """LLM listwise rerank, gated to sessions where the local ranking is
+    genuinely ambiguous -- the same condition pipeline/agent.py's exposure
+    gate uses to decide whether to withhold results (top-2 retriever scores
+    within AMBIGUITY_MARGIN of each other).
+
+    Blanket LLM reranking (LLMReranker, every session) was measured on all
+    200 public sessions at -0.044 TechnicalScore: it correctly fixed one
+    specific failure (a product whose title contains a colour word that is
+    not the product's colour) but demoted 37 sessions that were already
+    ranked correctly by the local scorer. This restricts the LLM call to the
+    ~1/3 of sessions where the local ranking cannot tell the top two apart --
+    where that fix helped and had nothing confidently-correct to disturb --
+    and falls through to the already-measured-correct local ranking
+    everywhere else, at a fraction of the token cost of reranking every turn.
+
+    AMBIGUITY_MARGIN is duplicated from pipeline/agent.py rather than
+    imported, to avoid a circular import (agent.py imports this module). Keep
+    the two values in sync; both are 0.05 as of this writing.
+    """
+
+    AMBIGUITY_MARGIN = 0.05
+
+    def __init__(
+        self, retriever, model: str = RANKING_MODEL, margin: float | None = None
+    ) -> None:
+        self.retriever = retriever
+        self.local = LocalReranker(retriever)
+        self.llm = LLMReranker(retriever, model=model)
+        self.margin = self.AMBIGUITY_MARGIN if margin is None else margin
+        # Diagnostics only -- not part of the scored `usage` output. Read
+        # after an eval run to see what fraction of turns actually called out.
+        self.calls_made = 0
+        self.calls_skipped = 0
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self.llm.prompt_tokens
+
+    @property
+    def completion_tokens(self) -> int:
+        return self.llm.completion_tokens
+
+    def _ambiguous(self, state: SharedSessionState, baseline: list[tuple[str, float]]) -> bool:
+        if len(baseline) < 2 or not state.constraints:
+            # Cold start (no constraints yet) has no score margin to measure
+            # ambiguity against -- same reasoning as the exposure gate's own
+            # cold-start branch. Nothing for the LLM to disambiguate either.
+            return False
+        i0 = self.local._position.get(baseline[0][0])
+        i1 = self.local._position.get(baseline[1][0])
+        if i0 is None or i1 is None:
+            return False
+        blob = self.retriever._blob(state)
+        s0 = self.retriever.score(i0, state, blob)
+        s1 = self.retriever.score(i1, state, blob)
+        return (s0 - s1) <= self.margin * max(abs(s0), 1e-6)
+
+    def rerank(
+        self, state: SharedSessionState, candidate_ids: list[str]
+    ) -> list[tuple[str, float]]:
+        baseline = self.local.rerank(state, candidate_ids)
+        if not self._ambiguous(state, baseline):
+            self.calls_skipped += 1
+            return baseline
+        self.calls_made += 1
+        return self.llm.rerank(state, candidate_ids)
+
+
+class PairwiseLLMReranker:
+    """LLM tie-break between the local ranker's top two, gated by ambiguity.
+
+    TargetedLLMReranker (listwise, top-12, same ambiguity gate) beat blanket
+    LLM reranking by +0.028 but still lost to plain local reranking by -0.024:
+    of 33 sessions it changed, 30 got worse, and 20 of those had already been
+    correct (rank 1) before the LLM touched them. A free-form listwise reorder
+    gives the model room to invent a plausible-sounding reason to demote a
+    right answer -- exactly the failure mode reported for large-small hybrid
+    rerankers in Huang et al., "CoRanking: Collaborative Ranking with Small
+    and Large Ranking Agents" (arXiv:2503.23427): large LLMs occasionally
+    demote candidates a small ranker already had right, attributed to poor
+    calibration rather than a genuine correction.
+
+    Two changes, both grounded rather than guessed:
+
+    1. Pairwise instead of listwise. Qin et al., "Large Language Models are
+       Effective Text Rankers with Pairwise Ranking Prompting" (PRP,
+       arXiv:2306.17563) report pairwise comparison is markedly more reliable
+       than listwise or pointwise prompting for models far larger than Haiku
+       4.5 -- a binary "which of these two" is a simpler task than reordering
+       twelve items, which is plausibly a large share of why the listwise
+       version was so willing to reshuffle a correct answer.
+    2. An asymmetric decision rule instead of a confidence threshold. Search
+       coverage on reranker calibration is consistent: verbalized LLM
+       confidence is poorly calibrated for this task, with rerankers reporting
+       high confidence on most queries regardless of correctness -- so asking
+       the model "how sure are you" and thresholding on the answer was never
+       going to distinguish real overrides from spurious ones. Instead the
+       decision is asymmetric by construction: keep the local #1 on any
+       response that is not an unambiguous "B", including malformed output,
+       refusals, or a tie. No sampled or verbalized confidence is used.
+
+    Only ranks 1-2 can move; 3-10 stay exactly as LocalReranker scored them,
+    a narrower intervention than TargetedLLMReranker's full top-12 reorder.
+
+    MEASURED OUTCOME: -0.0003 vs plain local reranking (0.9535 vs 0.9538 on
+    the public set) at 61% of blanket LLMReranker's token cost -- and,
+    checked session by session, zero sessions changed final rank. Nine
+    sessions converged on a different TURN (an intermediate-turn swap that
+    never affected the outcome; three earlier, six later), which is the whole
+    of the score gap. This is the calibration fix working exactly as the
+    literature predicted: it does not demote correct answers. It is also not
+    a net win -- ties, rather than beats, the reranker it was meant to
+    improve on. See PairwiseTop3LLMReranker below for why widening the
+    tournament does not close that gap either.
+    """
+
+    def __init__(
+        self, retriever, model: str = RANKING_MODEL, margin: float | None = None
+    ) -> None:
+        self.retriever = retriever
+        self.local = LocalReranker(retriever)
+        self.model = model
+        self.margin = TargetedLLMReranker.AMBIGUITY_MARGIN if margin is None else margin
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.calls_made = 0
+        self.calls_skipped = 0
+        self.swaps = 0
+        self._client = None
+        self._disabled = False
+
+    def _connect(self):
+        if self._client is not None or self._disabled:
+            return self._client
+        try:
+            import anthropic
+        except ImportError:
+            self._disabled = True
+            return None
+        try:
+            self._client = anthropic.Anthropic()
+        except Exception:
+            self._disabled = True
+        return self._client
+
+    def _summary(self, asin: str) -> str:
+        index = self.local._position.get(asin)
+        if index is None:
+            return asin
+        snippets = self.retriever.snippets[index][:3]
+        text = " | ".join(snippets) if snippets else self.retriever.corpora[index]
+        return text[:SUMMARY_CHARS]
+
+    def _ambiguous(self, state: SharedSessionState, asin_a: str, asin_b: str) -> bool:
+        if not state.constraints:
+            return False
+        i0 = self.local._position.get(asin_a)
+        i1 = self.local._position.get(asin_b)
+        if i0 is None or i1 is None:
+            return False
+        blob = self.retriever._blob(state)
+        s0 = self.retriever.score(i0, state, blob)
+        s1 = self.retriever.score(i1, state, blob)
+        return (s0 - s1) <= self.margin * max(abs(s0), 1e-6)
+
+    def _ask_pairwise(self, state: SharedSessionState, a_asin: str, b_asin: str) -> bool:
+        """One binary comparison: does B beat A? Any failure -- no client, API
+        error, malformed output -- returns False (keep A), the asymmetric
+        default the whole design relies on. Shared by the top-2 rerank() below
+        and PairwiseTop3LLMReranker's tournament, so both get identical prompt
+        handling, token accounting, and failure behavior."""
+        client = self._connect()
+        if client is None:
+            self.calls_skipped += 1
+            return False
+        requirements = "\n".join(f"- {c}" for c in state.constraints)
+        request = {}
+        if self.model.startswith(EFFORT_CAPABLE):
+            request["output_config"] = {"effort": "low"}
+        self.calls_made += 1
+        try:
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=512,
+                **request,
+                system=(
+                    "You judge which of two shopping search results better matches a "
+                    "customer's stated requirements. Reason briefly, then end your reply "
+                    "with a line containing only A or only B -- whichever product is the "
+                    "better match. If it is close or unclear, answer A."
+                ),
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Requirements:\n{requirements}\n\n"
+                        f"A: {self._summary(a_asin)}\n"
+                        f"B: {self._summary(b_asin)}"
+                    ),
+                }],
+            )
+        except Exception:
+            self._disabled = True
+            return False
+
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self.prompt_tokens += int(getattr(usage, "input_tokens", 0) or 0)
+            self.completion_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+
+        text = " ".join(b.text for b in response.content if getattr(b, "type", "") == "text")
+        # Asymmetric by construction: swap only if the LAST line -- the verdict
+        # the prompt asked for -- is the single character "B" and nothing else.
+        # Reasoning text earlier in the reply may mention either letter; only
+        # the final, isolated verdict counts. Every other outcome -- "A",
+        # trailing punctuation, a multi-word line, a refusal, empty output --
+        # keeps the local order. No verbalized confidence is read or
+        # thresholded, per the calibration finding above.
+        lines = [line.strip().upper() for line in text.splitlines() if line.strip()]
+        won = bool(lines) and lines[-1] == "B"
+        if won:
+            self.swaps += 1
+        return won
+
+    def rerank(
+        self, state: SharedSessionState, candidate_ids: list[str]
+    ) -> list[tuple[str, float]]:
+        baseline = self.local.rerank(state, candidate_ids)
+        if len(baseline) < 2 or not self._ambiguous(state, baseline[0][0], baseline[1][0]):
+            self.calls_skipped += 1
+            return baseline
+        a_asin, a_score = baseline[0]
+        b_asin, b_score = baseline[1]
+        if self._ask_pairwise(state, a_asin, b_asin):
+            return [(b_asin, b_score + 1.0), (a_asin, a_score)] + baseline[2:]
+        return baseline
+
+
+class PairwiseTop3LLMReranker(PairwiseLLMReranker):
+    """Extends the top-2 tie-break to a top-3 tournament: #1 vs #2 first (same
+    rule as the parent class), then the winner vs #3 -- but only if THAT pair
+    is also within the ambiguity margin, so cost stays proportional to actual
+    uncertainty rather than doubling on every ambiguous session.
+
+    Sequential and transitive rather than two independent A-vs-B / A-vs-C
+    calls, which would need an undefined tiebreak rule if both B and C beat A.
+    A tournament has no such case by construction: at each step there is
+    exactly one current champion and one challenger.
+
+    Motivation: PairwiseLLMReranker ties local reranking almost exactly
+    (-0.0003 on the public set) with zero demotions, but it can only ever
+    promote the local ranker's #2. It cannot rescue a target the local ranker
+    buried lower while confidently agreeing on #1 vs #2 -- reaching one slot
+    further tested whether that kind of near-miss is recoverable without
+    paying for a full listwise pass over the candidate pool.
+
+    MEASURED OUTCOME: it is not. -0.022 vs plain local reranking (0.9516 vs
+    0.9538), on nearly double PairwiseLLMReranker's token cost, with zero
+    corresponding gain -- 2 additional sessions demoted, 0 improved. The
+    motivating case (public_0178, a colour-in-a-band-name constraint that
+    misled scoring) is STILL a miss here, and checking why closes the
+    question definitively: its target sits at raw retriever rank 10 on the
+    turn that mattered, not rank 3. A sequential tournament of any small width
+    structurally cannot reach a candidate that far down without approaching
+    the cost and failure profile of the full listwise reconsideration that
+    already measured worse (TargetedLLMReranker, -0.024; LLMReranker, -0.052).
+    Kept for the record and the ablation, not recommended over
+    PairwiseLLMReranker for any purpose measured so far.
+    """
+
+    def rerank(
+        self, state: SharedSessionState, candidate_ids: list[str]
+    ) -> list[tuple[str, float]]:
+        baseline = self.local.rerank(state, candidate_ids)
+        if len(baseline) < 3:
+            return super().rerank(state, candidate_ids)
+
+        first, second, third = baseline[0], baseline[1], baseline[2]
+
+        if not self._ambiguous(state, first[0], second[0]):
+            self.calls_skipped += 1
+            return baseline
+
+        if self._ask_pairwise(state, first[0], second[0]):
+            round1_winner, round1_loser = second, first
+        else:
+            round1_winner, round1_loser = first, second
+
+        if self._ambiguous(state, round1_winner[0], third[0]):
+            if self._ask_pairwise(state, round1_winner[0], third[0]):
+                # third beat round1_winner, who itself beat round1_loser --
+                # transitively third > round1_winner > round1_loser. Getting
+                # this order backwards (round1_loser ranked above the
+                # runner-up that eliminated it) was caught by a unit test
+                # before any live call, not assumed correct.
+                champion = third
+                second_place, third_place = round1_winner, round1_loser
+            else:
+                champion = round1_winner
+                second_place, third_place = round1_loser, third
+        else:
+            self.calls_skipped += 1
+            champion = round1_winner
+            # round1_loser and third were never compared to each other -- no
+            # transitive ordering exists between them. Keep their original
+            # local order as the best available default rather than invent one.
+            second_place, third_place = round1_loser, third
+
+        placed = {champion[0], second_place[0], third_place[0]}
+        remaining = [row for row in baseline if row[0] not in placed]
+        return [champion, second_place, third_place] + remaining
+
+
 class IdentityReranker:
     """Preserves retriever order. Kept as the ablation baseline."""
 
