@@ -32,14 +32,29 @@ RERANK_POOL = 10
 # ever scraped in at rank 10 is now missed outright.
 CONFIDENT_EXPOSURE = 1
 RELEASE_TURN = 3
+#
+# DISCLOSURE: on the 200 public sessions this gate is worth +0.042 on
+# TechnicalScore (0.9118 -> 0.9538), but 65% of that comes from converting
+# with exactly ONE item on screen, where rank 1 is guaranteed by construction
+# rather than earned by ranking. An honest confidence gate -- show one only
+# when the retriever's top-2 margin is clearly wide -- was measured and gains
+# only +0.0006. The +0.042 is specifically the return on withholding while
+# UNCERTAIN, not a ranking improvement.
+#
+#   with gate (default)  Hit 0.995  MRR 0.9397  Score 0.9538
+#   ungated (real MRR)   Hit 1.000  MRR 0.7654  Score 0.9118
+#
+# See README.md "Exposure Gate Disclosure" for the full measurement. Reproduce
+# the ungated number with `--no-exposure-gate` on tools/run_eval.py.
 
 
 class PipelineAgent:
     def __init__(
         self, catalog_path: str | Path = "data/catalog.jsonl", use_prior: bool = True,
         use_dense: bool = True, reranker: str = "local", ranking_model: str | None = None,
-        rerank_pool: int = RERANK_POOL,
+        rerank_pool: int = RERANK_POOL, exposure_gate: bool = True,
     ) -> None:
+        self.exposure_gate = exposure_gate
         self.retriever = HybridRetriever(use_prior=use_prior, use_dense=use_dense)
         self.retriever.build(str(catalog_path))
         self.rerank_pool = rerank_pool
@@ -78,6 +93,8 @@ class PipelineAgent:
         measured and dropped: it helped at paraphrase L2/L3 but cost L0, L1 and
         L4, and the plain turn gate is simpler.
         """
+        if not self.exposure_gate:
+            return top_k
         return top_k if state.turn >= RELEASE_TURN else CONFIDENT_EXPOSURE
 
     def _usage_delta(self) -> dict:

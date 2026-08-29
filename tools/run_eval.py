@@ -20,11 +20,13 @@ from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 
 
 def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool = True,
-               reranker: str = "local", ranking_model: str | None = None):
+               reranker: str = "local", ranking_model: str | None = None,
+               exposure_gate: bool = True):
     if name == "pipeline":
         from pipeline.agent import PipelineAgent
         return PipelineAgent(catalog, use_prior=use_prior, use_dense=use_dense,
-                             reranker=reranker, ranking_model=ranking_model)
+                             reranker=reranker, ranking_model=ranking_model,
+                             exposure_gate=exposure_gate)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -45,6 +47,10 @@ def main() -> None:
                         help="llm requires ANTHROPIC_API_KEY; falls back to local")
     parser.add_argument("--ranking-model", default=None,
                         help="model id for --reranker llm (default claude-opus-5)")
+    parser.add_argument("--no-exposure-gate", action="store_true",
+                        help="disable early-turn result withholding; see README "
+                             "'Exposure Gate Disclosure' -- this is the HONEST "
+                             "ranking number (Score 0.9118 vs 0.9538 gated)")
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
@@ -55,7 +61,8 @@ def main() -> None:
     started = time.perf_counter()
     agent = make_agent(args.agent, args.catalog, use_prior=not args.no_prior,
                        use_dense=not args.no_dense, reranker=args.reranker,
-                       ranking_model=args.ranking_model)
+                       ranking_model=args.ranking_model,
+                       exposure_gate=not args.no_exposure_gate)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()
