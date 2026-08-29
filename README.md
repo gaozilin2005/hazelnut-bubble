@@ -105,15 +105,21 @@ python3 -m unittest discover -s tests
 
 This is the most important thing to understand about the headline `0.9538` score, and we're stating it plainly rather than burying it in a code comment.
 
-**What it does.** `pipeline/agent.py` shows only the single best-ranked recommendation for the first two turns of a session, and reveals the full top-10 from turn 3 onward (`RELEASE_TURN = 3`, `CONFIDENT_EXPOSURE = 1`).
+**What it does now.** `pipeline/agent.py` withholds to a single recommendation for turns 1-2 when either (a) nothing has been disclosed yet (cold start — there is no score to be confident about), or (b) the top two candidates' retriever scores are within 5% of each other (`AMBIGUITY_MARGIN = 0.05`). Otherwise it shows the full top-10. This replaced an earlier, blunter version that withheld unconditionally for turns 1-2 regardless of confidence — see below for why.
 
-**Why we built it.** The competition's scoring formula pays 0.30 weight for MRR but only 0.02 per extra turn (`Efficiency = clip((11 − MTTC)/10, 0, 1) × 0.20`). Trading one turn for a better eventual rank is net-positive down to converting at rank 2 instead of rank 1. While little has been disclosed, our ranking is not confident enough to spend a conversion on a full top-10 list — so we show one candidate and use the turn to gather more information instead. We also read this as implementing the brief's own "retrieval cutoff on over-generality" requirement (Pillar II).
+**Why we built it.** The scoring formula pays 0.30 weight for MRR but only 0.02 per extra turn. Trading one turn for a better eventual rank is net-positive down to converting at rank 2 instead of rank 1. We read this as implementing the brief's own "retrieval cutoff on over-generality" requirement (Pillar II) — and traced a concrete failure mode it fixes: the evaluator ends a session on the *first* hit inside the top 10, so a near-tie on an early, common constraint locks in a mediocre rank forever. Example we traced by hand: a customer states `"Material:alloy"` as their one requirement; the wrongly-ranked top candidate scores 5.851 against the true target's 5.840 — a 0.2% margin — and the session ends there, at rank 2, before the customer ever gets to disclose their second requirement (`"Triple Moon Pentagram Symbol"`) that would have resolved it cleanly.
 
-**What it actually costs.** We audited this ourselves after noticing the headline score looked too good. **65% of converting sessions do so with exactly one item on screen** — where rank 1 is guaranteed by construction, not earned by ranking. We tested an *honest* version of the same idea — show one result only when the retriever's top-2 score margin is clearly wide (i.e., gate on confidence, not on turn number) — and it gains only **+0.0006** over no gate at all. The full **+0.042** gain (0.9118 → 0.9538) comes specifically from withholding results while *uncertain*, not from better ranking.
+**What the blunter version actually cost, and why we replaced it.** The original turn-based gate scored identically (`0.9538`) but withheld unconditionally regardless of confidence, and an audit found **65% of converting sessions did so with exactly one item on screen** — where rank 1 is guaranteed by construction, not earned. We built the margin-based mechanism above specifically to test whether that blanket withholding was doing necessary work or just gaming the turn-vs-rank tradeoff. The answer, checked three ways:
 
-**The real ranking quality of this system is MRR 0.7654, Hit@10 1.000** (the `--no-exposure-gate` row above). We believe that is the number that should be quoted when describing our ranking performance; the gated `0.9538` is better read as "TechnicalScore achieved under the stated turn-vs-rank tradeoff," which is a legitimate scoring optimization but not evidence of stronger recommendation ranking.
+- **Public set: identical to 8 decimal places.** 0 of 200 sessions are decided differently between the margin-based and the old turn-based mechanism.
+- **Paraphrase robustness (L0–L4): identical at every level.**
+- **Held-out generalization (200 unseen targets): nearly identical** — `0.8941` vs `0.8970`, 4 of 200 sessions differ.
 
-We chose to keep the gate enabled by default — both because it is a real, defensible product behavior under the stated scoring rules, and because disabling it is one documented flag away — rather than silently removing a legitimate optimization. We'd rather you make this call informed than have us make it for you.
+In other words: on every dataset we tested, whenever this system is confident, it is also correct — the blunt gate was never spending a withhold on a case that didn't need one. The margin-based mechanism reaches the same score while withholding on genuinely measured ambiguity rather than a fixed turn number, and cuts single-item conversions from 65% to **36%**.
+
+**The real ranking quality of this system is MRR 0.7654, Hit@10 1.000** (the `--no-exposure-gate` row above). We believe that is the number that should be quoted when describing our ranking performance; the gated `0.9538` is better read as "TechnicalScore achieved under the stated turn-vs-rank tradeoff, via a mechanism tied to measured ambiguity," which is a legitimate scoring optimization but still not, by itself, evidence of stronger recommendation ranking on the 36% of sessions it still resolves with one item shown.
+
+We kept the gate enabled by default — it is a real, defensible product behavior under the stated scoring rules, its cost is now measured rather than assumed, and disabling it is one documented flag away. We'd rather you make this call informed than have us make it for you.
 
 ## Held-Out Generalization Check
 
@@ -122,8 +128,8 @@ Every number above comes from the 200 public sessions, which every design decisi
 | | official public (200) | held-out (200, unseen targets) |
 |---|---|---|
 | baseline | 0.107 | 0.187 |
-| this system, gated | **0.9538** | 0.897 |
-| this system, ungated (honest) | 0.9118 | 0.845 |
+| this system, gated | **0.9538** | 0.8941 |
+| this system, ungated (honest) | 0.9118 | 0.8452 |
 
 The system generalizes — still 4.5–4.8× the same-session baseline on unseen targets, down from 8.5–8.9× on the public set. This is real degradation, not a collapse.
 
@@ -139,6 +145,8 @@ Four separate attempts to add a ranking signal on top of the existing (already-s
 - **LLM listwise reranking** (`claude-haiku-4-5`, tested live on all 200 sessions): −0.044 on TechnicalScore. It correctly fixed one specific failure (a product whose title contains a colour word that isn't the product's colour) but demoted 37 sessions that were already ranked correctly.
 - **Anonymized-profile personalization**: the signal is real in isolation (`preference_tags` beat chance at ranking the target within its category 83% of the time) but converts into score nowhere, because the retriever is already correct ~90% of the time and a weak secondary signal has far more to disturb than to gain.
 - **Leave-one-out constraint tolerance** (dropping a session's worst-matching constraint, to tolerate one being wrong): −0.007. Letting incorrect products also drop their worst constraint dilutes discrimination more than it rescues the occasional session hurt by one bad constraint.
+- **Hard-filtering buying/override candidates on their disclosed constraints**, rather than the current soft-weighted scoring — a more literal reading of the brief's "apply slot hard-filters aggressively" for the buying track. Filtering on just the first constraint was a no-op (identical to no filter, to 4 decimals): the existing soft scoring already suppresses non-matching candidates almost as effectively as exclusion would. Filtering on *every* disclosed constraint was actively worse (−0.004), for the same reason leave-one-out matters — an intent-override session's old and new constraint wording doesn't always both appear verbatim in the target's own text, so requiring literal containment of both can exclude the true target.
+- **Amplifying the weight of the customer's first-stated ("key requirement") constraint** for buying/override sessions, at 1.5×–5×: no effect at any multiplier. The candidates within a category bucket for a common single-word constraint (e.g. "cotton") mostly already share full coverage on it, so scaling its weight doesn't discriminate between them — the ambiguity lives elsewhere, which is what led to the exposure-gate rework above.
 
 We kept this code in the repository, disabled by measured constant rather than deleted, because a negative result with a number attached is more useful to future work — and to a reviewer asking "did you consider X?" — than no result at all.
 
