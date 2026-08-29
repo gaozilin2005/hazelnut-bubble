@@ -128,6 +128,110 @@ class BrainPolicy:
             state.asked.append(attribute)
         return self.brain.question_for(attribute), attribute
 
+class DynamicPolicy:
+    """Person B's online-learning dynamic clarification policy."""
+
+    name = "dynamic"
+
+    def __init__(self) -> None:
+        self.brain = ConversationBrain()
+
+        # Last SharedSessionState constraints seen for each session.
+        # Used to learn whether our previous question produced new information.
+        self.previous_constraints: dict[str, set[str]] = {}
+
+    def reset(
+        self,
+        session_id: str,
+        user_profile: dict,
+    ) -> None:
+        self.brain.reset(
+            session_id,
+            user_profile,
+        )
+
+        self.previous_constraints[
+            session_id
+        ] = set()
+
+    def _learn_from_shared_state(
+        self,
+        state: SharedSessionState,
+    ) -> None:
+
+        mirror = self.brain.get_state(
+            state.session_id
+        )
+
+        before = self.previous_constraints.get(
+            state.session_id,
+            set(),
+        )
+
+        after = set(state.constraints)
+
+        new_constraints = after - before
+
+        if (
+            new_constraints
+            and mirror.last_asked_attribute is not None
+            and mirror.last_asked_attribute
+            in self.brain.attribute_stats
+        ):
+            self.brain.attribute_stats[
+                mirror.last_asked_attribute
+            ]["useful"] += 1
+
+        self.previous_constraints[
+            state.session_id
+        ] = after
+
+    def ask(
+        self,
+        state: SharedSessionState,
+    ) -> tuple[str, str | None]:
+
+        # 1. Learn from response to previous question
+        self._learn_from_shared_state(state)
+
+        # 2. Mirror authoritative shared state into B
+        mirror = self.brain.get_state(
+            state.session_id
+        )
+
+        mirror.current_turn = state.turn
+        mirror.category = state.category
+        mirror.known_constraints = list(
+            state.constraints
+        )
+
+        mirror.no_preference_attributes |= (
+            state.no_preference
+        )
+
+        # 3. D1 dynamically chooses next question
+        attribute = (
+            self.brain.choose_next_attribute(
+                state.session_id,
+                strategy="dynamic",
+            )
+        )
+
+        # 4. Record what we actually asked
+        self.brain.record_asked_attribute(
+            state.session_id,
+            attribute,
+        )
+
+        if attribute is not None:
+            state.asked.append(attribute)
+
+        return (
+            self.brain.question_for(attribute),
+            attribute,
+        )
+
+
 
 class IntegratedPolicy:
     """A's retrieval state + B's conversation brain. The shipping policy.
@@ -258,7 +362,11 @@ def make_dialog_policy(name: str):
         return BrainPolicy("simulator_aware")
     if name == "brain-fixed":
         return BrainPolicy("fixed")
+    if name == "dynamic":
+        return DynamicPolicy()
     return IntegratedPolicy()
+
+
 
 
 class PipelineAgent:

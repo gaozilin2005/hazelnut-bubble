@@ -73,7 +73,7 @@ def main() -> None:
                         help="disable the dense vector route (ablation)")
     parser.add_argument("--dialog", default="integrated",
                         choices=("integrated", "wildcard", "silent", "drain",
-                                 "brain-simulator", "brain-fixed"),
+                                 "brain-simulator", "brain-fixed", "dynamic"),
                         help="question policy: wildcard is the placeholder baseline; "
                              "brain-* use pipeline/dialog.py (B)")
     parser.add_argument("--erase-on-override", action="store_true",
