@@ -291,10 +291,24 @@ class PipelineAgent:
         self.exposure = exposure
         self.release_turn = release_turn
         self.states: dict[str, SharedSessionState] = {}
+        self.brain = ConversationBrain()
 
-    def reset(self, session_id: str, user_profile: dict) -> None:
+    def reset(
+        self,
+        session_id: str,
+        user_profile: dict,
+    ) -> None:
+
+        profile = user_profile or {}
+
         self.states[session_id] = SharedSessionState(
-            session_id=session_id, user_profile=user_profile or {}
+            session_id=session_id,
+            user_profile=profile,
+        )
+
+        self.brain.reset(
+            session_id=session_id,
+            user_profile=profile,
         )
         self.dialog.reset(session_id, user_profile or {})
 

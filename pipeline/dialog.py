@@ -1,7 +1,20 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 
+
 FIXED_PRIORITY = [
+    "material",
+    "color",
+    "size",
+    "style",
+    "budget",
+    "use_case",
+    "feature",
+    "brand",
+    "other",
+]
+
+DYNAMIC_ATTRIBUTES = [
     "material",
     "color",
     "size",
@@ -52,9 +65,19 @@ class ConversationState:
     initial_preference: str | None = None
     current_preference: str | None = None
     
+    last_asked_attribute: str | None = None
+    
 class ConversationBrain:
     def __init__(self):
         self.states: dict[str, ConversationState] = {}
+
+        self.attribute_stats = {
+            attribute: {
+                "asked": 0,
+                "useful": 0,
+            }
+            for attribute in DYNAMIC_ATTRIBUTES
+        }
         
     def reset(self, session_id: str, user_profile: dict) -> None:
         self.states[session_id] = ConversationState(
@@ -80,7 +103,12 @@ class ConversationBrain:
             return
         
         state = self.get_state(session_id)
+
         state.asked_attributes.add(attribute)
+        state.last_asked_attribute = attribute
+
+        if attribute in self.attribute_stats:
+            self.attribute_stats[attribute]["asked"] += 1
         
     def _extract_no_preference_attribute(
         self,
@@ -193,6 +221,40 @@ class ConversationBrain:
         new_value = new_value.strip().rstrip(".")
         return new_value if new_value else None
     
+    def _disclosure_probability(
+        self,
+        attribute: str,
+    ) -> float:
+
+        stats = self.attribute_stats[attribute]
+
+        asked = stats["asked"]
+        useful = stats["useful"]
+
+        if asked == 0:
+            return 0.5
+
+        return useful / asked
+    
+    def _score_attribute(
+        self,
+        state: ConversationState,
+        attribute: str,
+    ) -> float:
+
+        if attribute in state.asked_attributes:
+            return -1.0
+
+        if attribute in state.no_preference_attributes:
+            return -1.0
+
+        disclosure_probability = (
+            self._disclosure_probability(attribute)
+        )
+
+        return disclosure_probability
+    
+    
     def question_for(
         self,
         attribute: str | None,
@@ -209,6 +271,9 @@ class ConversationBrain:
     
     def observe(self, session_id: str, user_message: str, turn: int,) -> None:
         state = self.get_state(session_id)
+        constraints_before = set(
+            state.known_constraints
+        )
         state.current_turn = turn
         state.history.append({"turn": turn, "user": user_message})
         no_preference = self._extract_no_preference_attribute(user_message)
@@ -256,32 +321,80 @@ class ConversationBrain:
             state.current_preference = override_value
             if override_value not in state.known_constraints:
                 state.known_constraints.append(override_value)
+        constraints_after = set(
+            state.known_constraints
+        )
+
+        new_constraints = (
+            constraints_after
+            - constraints_before
+        )
+        if (
+            new_constraints
+            and state.last_asked_attribute is not None
+            and state.last_asked_attribute in self.attribute_stats
+        ):
+            self.attribute_stats[
+                state.last_asked_attribute
+            ]["useful"] += 1
                 
     
     def choose_next_attribute(
         self,
         session_id: str,
-        strategy: str = "fixed",
+        strategy: str = "dynamic",
+        candidate_stats: dict | None = None,
     ) -> str | None:
 
         state = self.get_state(session_id)
 
-        if strategy == "simulator_aware":
-            priority = SIMULATOR_AWARE_PRIORITY
-        else:
+        if strategy == "fixed":
             priority = FIXED_PRIORITY
 
-        for attribute in priority:
+            for attribute in priority:
+                if attribute in state.asked_attributes:
+                    continue
 
-            if attribute in state.asked_attributes:
-                continue
+                if attribute in state.no_preference_attributes:
+                    continue
 
-            if attribute in state.no_preference_attributes:
-                continue
+                return attribute
 
-            return attribute
+            return None
 
-        return None
+
+        if strategy == "simulator_aware":
+            priority = SIMULATOR_AWARE_PRIORITY
+
+            for attribute in priority:
+                if attribute in state.asked_attributes:
+                    continue
+
+                if attribute in state.no_preference_attributes:
+                    continue
+
+                return attribute
+
+            return None
+
+
+        scores = {}
+
+        for attribute in DYNAMIC_ATTRIBUTES:
+            scores[attribute] = self._score_attribute(
+                state,
+                attribute,
+            )
+
+        best_attribute = max(
+            scores,
+            key=scores.get,
+        )
+
+        if scores[best_attribute] < 0:
+            return None
+
+        return best_attribute
     
 
 
