@@ -22,11 +22,13 @@ from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 
 
 def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool = True,
-               reranker: str = "local"):
+               reranker: str = "local", dialog: str = "integrated",
+               erase_on_override: bool = False):
     if name == "pipeline":
         from pipeline.agent import PipelineAgent
         return PipelineAgent(catalog, use_prior=use_prior, use_dense=use_dense,
-                             reranker=reranker)
+                             reranker=reranker, dialog=dialog,
+                             erase_on_override=erase_on_override)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -67,6 +69,14 @@ def main() -> None:
                         help="disable the popularity prior (confound check)")
     parser.add_argument("--no-dense", action="store_true",
                         help="disable the dense vector route (ablation)")
+    parser.add_argument("--dialog", default="integrated",
+                        choices=("integrated", "wildcard", "silent", "drain",
+                                 "brain-simulator", "brain-fixed"),
+                        help="question policy: wildcard is the placeholder baseline; "
+                             "brain-* use pipeline/dialog.py (B)")
+    parser.add_argument("--erase-on-override", action="store_true",
+                        help="drop the superseded preference on intent override "
+                             "(Pillar II slot rewriting); measured, not assumed")
     parser.add_argument("--reranker", default="local",
                         choices=("local", "llm", "identity"),
                         help="llm requires ANTHROPIC_API_KEY; falls back to local")
@@ -79,7 +89,8 @@ def main() -> None:
 
     started = time.perf_counter()
     agent = make_agent(args.agent, args.catalog, use_prior=not args.no_prior,
-                       use_dense=not args.no_dense, reranker=args.reranker)
+                       use_dense=not args.no_dense, reranker=args.reranker,
+                       dialog=args.dialog, erase_on_override=args.erase_on_override)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()
@@ -92,6 +103,8 @@ def main() -> None:
             "dataset": args.dataset,
             "catalog": args.catalog,
             "reranker": args.reranker if args.agent == "pipeline" else None,
+            "dialog": args.dialog if args.agent == "pipeline" else None,
+            "erase_on_override": args.erase_on_override,
             "use_prior": not args.no_prior,
             "use_dense": not args.no_dense,
             "limit": args.limit or None,
@@ -107,7 +120,11 @@ def main() -> None:
     # Default name carries the dataset, not just the agent. Keying on the agent
     # alone meant two different datasets wrote to one file and the second run
     # silently destroyed the first.
-    output = Path(args.output or f"results_{args.agent}_{Path(args.dataset).stem}.json")
+    suffix = f"_{args.dialog}" if args.agent == "pipeline" and args.dialog != "integrated" else ""
+    suffix += "_erase" if args.erase_on_override else ""
+    output = Path(
+        args.output or f"results_{args.agent}_{Path(args.dataset).stem}{suffix}.json"
+    )
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({k: v for k, v in result.items() if k != "sessions"}, indent=2))
     print(f"-> {output}", file=sys.stderr)

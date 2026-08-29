@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 
+from pipeline.textutil import classify_attribute
 from pipeline.interfaces import (
     INTENT_BROWSING,
     INTENT_BUYING,
@@ -32,6 +33,16 @@ OVERRIDE_MARKER = "What I need is: "
 NO_SIGNAL_RE = re.compile(
     r"^\s*(?:I don't have (?:an additional )?a?\s*preference for|"
     r"Those options are not quite right yet)",
+    re.I,
+)
+
+# The two decline templates name the attribute being declined:
+#   "I don't have a preference for {attr}; please use your judgment."   (boundary)
+#   "I don't have an additional preference for {attr}."                 (exhausted)
+# The attribute carries no product signal, but it is a strong instruction to the
+# question policy: never ask for it again.
+NO_PREFERENCE_RE = re.compile(
+    r"^\s*I don't have (?:an additional|a) preference for\s+(?P<attribute>[^.;]+)",
     re.I,
 )
 
@@ -83,6 +94,50 @@ def parse_reply(message: str) -> tuple[bool, list[str]]:
     return False, []
 
 
+def fill_slots(state: SharedSessionState) -> None:
+    """Project the flat constraint list onto per-attribute slots.
+
+    Pillar II asks for incremental slots. `state.constraints` is kept as the
+    ordered verbatim list because that is what retrieval scores against; slots
+    are the structured view over the same facts, rebuilt each turn so the two
+    can never disagree.
+    """
+    slots: dict[str, list[str]] = {}
+    for value in state.constraints:
+        slots.setdefault(classify_attribute(value), []).append(value)
+    state.slots = slots
+
+
+def parse_no_preference(message: str) -> str | None:
+    """-> the attribute the customer just declined, if any.
+
+    Kept separate from parse_reply rather than widening its return tuple:
+    tools/robustness.py unpacks that as a 2-tuple.
+    """
+    match = NO_PREFERENCE_RE.match(message)
+    return match.group("attribute").strip().lower() if match else None
+
+
+def erase_superseded(state: SharedSessionState) -> None:
+    """Drop the preference the customer just replaced (Pillar II slot rewriting).
+
+    The simulator's intent-override opener discloses `old_value`, and the override
+    message discloses `new_value` -- both drawn from the SAME target's intent card
+    (evaluator::behavior_for). So the "conflict" is between two true descriptions
+    of one product, and erasing throws away a valid retrieval signal.
+
+    That is an argument, not evidence, which is why this is a flag rather than a
+    default. Enable with --erase-on-override and compare.
+    """
+    if state.override_turn is None or not state.constraints:
+        return
+    superseded = state.constraints[0]
+    if superseded != state.override_value:
+        state.constraints.remove(superseded)
+        state.slots = {}
+        fill_slots(state)
+
+
 def route(state: SharedSessionState, message: str, turn: int) -> SharedSessionState:
     """Fold the turn into shared state. Called at the top of retrieve()."""
     state.turn = turn
@@ -96,7 +151,12 @@ def route(state: SharedSessionState, message: str, turn: int) -> SharedSessionSt
         state.intent = intent
         for value in constraints:
             state.add_constraint(value)
+        fill_slots(state)
         return state
+
+    declined = parse_no_preference(message)
+    if declined:
+        state.no_preference.add(declined)
 
     is_override, constraints = parse_reply(message)
     if is_override:
@@ -104,6 +164,13 @@ def route(state: SharedSessionState, message: str, turn: int) -> SharedSessionSt
         # intent card, so they describe one product and never truly conflict.
         # Earlier constraints are therefore kept, not discarded.
         state.intent = INTENT_OVERRIDE
+        if state.override_turn is None:
+            state.override_turn = turn
+            # Record it verbatim: add_constraint dedupes, so a repeated value
+            # leaves `constraints` unchanged and the last element is stale.
+            if constraints:
+                state.override_value = constraints[0]
     for value in constraints:
         state.add_constraint(value)
+    fill_slots(state)
     return state

@@ -23,12 +23,23 @@ class SharedSessionState:
 
     # --- A writes ---
     intent: str = INTENT_UNKNOWN
+    # Turn on which the customer actually replaced a preference. Distinct from
+    # `intent`: an intent-override session is labelled OVERRIDE from its opening
+    # message, but the override event itself lands on turn 3 or 4.
+    override_turn: int | None = None
+    override_value: str | None = None   # what the customer switched TO, verbatim
     category: str | None = None          # parsed coarse category, verbatim
     category_confident: bool = False     # False => retrieval must not hard-filter
 
     # --- B writes ---
     slots: dict[str, list[str]] = field(default_factory=dict)
     asked: list[str] = field(default_factory=list)
+
+    # Attributes the customer has explicitly declined to constrain. The router
+    # detects these (the simulator answers "I don't have a preference for X")
+    # but until now discarded them; a question policy that re-asks a declined
+    # attribute burns a turn for nothing.
+    no_preference: set[str] = field(default_factory=set)
 
     # --- both write ---
     # Raw disclosed constraint strings, in disclosure order. These are verbatim

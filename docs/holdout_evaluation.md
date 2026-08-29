@@ -238,8 +238,10 @@ Output filenames are derived from the agent and dataset — `results_pipeline_pu
 and so on — so runs on different datasets cannot overwrite each other. Pass `--output` only
 if you want a different name.
 
-Useful flags: `--reranker {local,llm,identity}`, `--no-prior`, `--no-dense` for ablations,
-and `--limit N` for a quick smoke test.
+Useful flags: `--dialog {wildcard,brain-simulator,brain-fixed}` to swap question policy,
+`--reranker {local,llm,identity}`, `--no-prior`, `--no-dense` for ablations, and `--limit N`
+for a quick smoke test. Non-default policies get their own output filename, so an A/B does
+not overwrite the baseline.
 
 ### Step 4 — slice the results
 
@@ -342,6 +344,56 @@ needed to match the public profile at n=800 do not exist in the catalog — the 
 above forbids it. So the private set most likely skews toward ordinary products, which makes
 the catalog-representative draw the better proxy for final judging. *This is an inference
 from catalog arithmetic, not an organizer statement.*
+
+## Question policy: placeholder vs. B's brain
+
+`pipeline/dialog.py` was committed but unimported, so it had never been scored. It is now
+selectable via `--dialog`, and all three policies share the same retrieval, reranking and
+state, so the comparison isolates question strategy alone:
+
+| policy | public 200 | held-out 1,000 | MTTC (broad) |
+|---|---|---|---|
+| `wildcard` — placeholder | **0.9538** | **0.9072** | 2.80 |
+| `brain-simulator` | 0.9339 | 0.8684 | 3.29 |
+| `brain-fixed` | 0.9136 | 0.8355 | 4.29 |
+
+**The placeholder wins, and its margin widens out of sample** (−0.020 → −0.039 for
+`brain-simulator`). The mechanism is visible in MTTC. `ask_attribute="other"` is a wildcard
+in `customer_reply`: it returns the next two undisclosed constraints *of any type*. Asking
+for a named attribute returns only constraints where
+`classify_constraint(value) == attribute`, so most named asks return nothing and the turn is
+wasted. `brain-fixed` opens with `material` and needs 4.29 turns; the wildcard needs 2.80.
+
+`brain-simulator` lands between the two precisely because its priority list starts with
+`other` — it plays the wildcard first, then degrades to named attributes.
+
+This is not an argument that B's work is wrong. It is an argument that **the simulator does
+not reward attribute-by-attribute questioning**, which is a finding about the benchmark, and
+belongs in the writeup next to the lexical-shortcut claim.
+
+### How they were integrated
+
+`SharedSessionState` is the single source of truth. The brain ships its own `observe()` that
+re-parses the customer message, duplicating `router.parse_*` against the same templates — and
+disagreeing in detail, splitting constraints on `";"` where the router splits on `"; "`.
+Running both parsers would mean two states that can drift, so `BrainPolicy.ask`
+(`pipeline/agent.py`) mirrors the router's already-parsed state into the brain's
+`ConversationState` and calls only what is genuinely B's: `choose_next_attribute` and its
+asked/declined bookkeeping. One parser, one state, B's policy on top.
+
+Two fixes were needed along the way:
+
+- `dialog.py` defined `choose_next_attribute` **twice**. The first referenced
+  `ATTRIBUTE_PRIORITY`, which is defined nowhere — a latent `NameError` that survived only
+  because the second definition shadowed it. The dead copy was removed.
+- The router detected the customer's "I don't have a preference for X" replies but discarded
+  which attribute was declined. It now records them in `SharedSessionState.no_preference`.
+
+That second one turned out to be **inert**, and the honest result is worth keeping: adding it
+changed no score at all. `choose_next_attribute` walks its priority list once and skips
+anything already in `asked_attributes`, so an attribute is never asked twice regardless of
+whether the customer declined it. Decline tracking would only pay for a policy that can
+re-ask — it is correct plumbing with no current consumer.
 
 ## Dead inputs
 
