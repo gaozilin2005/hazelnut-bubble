@@ -43,6 +43,8 @@ class PipelineAgent:
         self.retriever = HybridRetriever(use_prior=use_prior, use_dense=use_dense)
         self.retriever.build(str(catalog_path))
         self.rerank_pool = rerank_pool
+        self._reported_prompt = 0
+        self._reported_completion = 0
         if reranker == "llm":
             self.reranker = LLMReranker(
                 self.retriever, model=ranking_model or "claude-opus-5"
@@ -78,6 +80,16 @@ class PipelineAgent:
         """
         return top_k if state.turn >= RELEASE_TURN else CONFIDENT_EXPOSURE
 
+    def _usage_delta(self) -> dict:
+        prompt = getattr(self.reranker, "prompt_tokens", 0)
+        completion = getattr(self.reranker, "completion_tokens", 0)
+        delta = {
+            "prompt_tokens": max(0, prompt - self._reported_prompt),
+            "completion_tokens": max(0, completion - self._reported_completion),
+        }
+        self._reported_prompt, self._reported_completion = prompt, completion
+        return delta
+
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         state = self.states.get(session_id)
         if state is None:
@@ -95,8 +107,9 @@ class PipelineAgent:
             "recommendations": [
                 {"parent_asin": asin} for asin, _ in ranked[:self._exposure(state, top_k)]
             ],
-            "usage": {
-                "prompt_tokens": getattr(self.reranker, "prompt_tokens", 0),
-                "completion_tokens": getattr(self.reranker, "completion_tokens", 0),
-            },
+            # The evaluator SUMS usage across turns, so report the delta since the
+            # last turn, not the reranker's running total. Reporting the total
+            # re-adds it on every turn and inflates the figure quadratically --
+            # a 200-session run read 43.2M tokens instead of ~160K.
+            "usage": self._usage_delta(),
         }

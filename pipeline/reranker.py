@@ -22,6 +22,10 @@ from pipeline.interfaces import SharedSessionState
 from pipeline.textutil import normalize
 
 RANKING_MODEL = "claude-opus-5"
+# output_config.effort is rejected by older models (Haiku 4.5, Sonnet 4.5), so it
+# is sent only to models that accept it. Passing it to Haiku 400s every call,
+# which this class would swallow as a fallback -- a silent no-op run.
+EFFORT_CAPABLE = ("claude-opus-5", "claude-opus-4", "claude-sonnet-5", "claude-fable")
 MAX_LLM_CANDIDATES = 12
 SUMMARY_CHARS = 150
 
@@ -137,11 +141,14 @@ class LLMReranker:
             f"{i}. {self._summary(asin)}" for i, asin in enumerate(shortlist)
         )
         requirements = "\n".join(f"- {c}" for c in state.constraints)
+        request = {}
+        if self.model.startswith(EFFORT_CAPABLE):
+            request["output_config"] = {"effort": "low"}
         try:
             response = client.messages.create(
                 model=self.model,
                 max_tokens=2048,
-                output_config={"effort": "low"},
+                **request,
                 system=(
                     "You rank shopping search results. The customer has one specific "
                     "product in mind. Given their stated requirements and a numbered "
