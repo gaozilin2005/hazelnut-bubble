@@ -260,6 +260,17 @@ Four separate attempts to add a ranking signal on top of the existing (already-s
   unusually popular, so a popularity prior fits that sampling artifact rather than improving
   retrieval. Left enabled by default, but it is a judgement call about whether the private 800
   resemble the public 200 — and the catalog arithmetic above suggests they cannot.
+- **Dense-similarity tie-breaking within a narrow score band** (`--tie-break-dense`), motivated by
+  a real diagnosis: 29 of the 38 remaining held-out misses are not a ranking error but an
+  information deficiency — the target sits a few ranks below the cutoff in a wide, flat stalemate
+  (span as small as 0.001 across 12 near-identical listings) because every disclosed constraint is
+  an attribute nearly the whole bucket shares. Unlike the RRF fusion above, this only ever reorders
+  the band of candidates already tied within the margin, never displacing a clear #1. It looked
+  like a genuine win on the 1,000-session held-out draw it was diagnosed on (+0.0061), and we
+  nearly reported it as one — but cross-validating against an *independently sampled* 200-session
+  held-out set gave −0.0019 to +0.0014, noise-level and not the same sign, while the public-200
+  cost was consistent and worsened with margin (−0.014 to −0.021). The apparent gain did not
+  survive a second sample. Same trap as the exposure-schedule sweep below, caught the same way.
 
 We kept this code in the repository, disabled by measured constant rather than deleted, because a negative result with a number attached is more useful to future work — and to a reviewer asking "did you consider X?" — than no result at all.
 
