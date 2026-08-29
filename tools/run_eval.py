@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -27,6 +29,31 @@ def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool 
                              reranker=reranker)
     from starter.agent import Agent
     return Agent(catalog)
+
+
+def git_state() -> dict:
+    """Commit and cleanliness of the tree that produced a result.
+
+    `dirty` is the load-bearing field: a score measured with uncommitted edits
+    cannot be reproduced from the commit alone, and saying so in the file is
+    cheaper than discovering it later.
+    """
+    def run(*args: str) -> str | None:
+        try:
+            return subprocess.run(
+                args, cwd=Path(__file__).resolve().parent.parent,
+                capture_output=True, text=True, timeout=5, check=True,
+            ).stdout.strip()
+        except (subprocess.SubprocessError, OSError):
+            return None
+
+    commit = run("git", "rev-parse", "--short", "HEAD")
+    status = run("git", "status", "--porcelain")
+    return {
+        "commit": commit,
+        "branch": run("git", "rev-parse", "--abbrev-ref", "HEAD"),
+        "dirty": None if status is None else bool(status),
+    }
 
 
 def main() -> None:
@@ -57,14 +84,33 @@ def main() -> None:
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()
 
+    # Provenance first, so `head` on a result file answers "what made this?".
+    result = {
+        "provenance": {
+            **git_state(),
+            "agent": args.agent,
+            "dataset": args.dataset,
+            "catalog": args.catalog,
+            "reranker": args.reranker if args.agent == "pipeline" else None,
+            "use_prior": not args.no_prior,
+            "use_dense": not args.no_dense,
+            "limit": args.limit or None,
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        },
+        **result,
+    }
     result["timing"] = {
         "build_seconds": round(built - started, 2),
         "eval_seconds": round(finished - built, 2),
         "seconds_per_session": round((finished - built) / max(1, len(samples)), 4),
     }
-    output = Path(args.output or f"results_{args.agent}.json")
+    # Default name carries the dataset, not just the agent. Keying on the agent
+    # alone meant two different datasets wrote to one file and the second run
+    # silently destroyed the first.
+    output = Path(args.output or f"results_{args.agent}_{Path(args.dataset).stem}.json")
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({k: v for k, v in result.items() if k != "sessions"}, indent=2))
+    print(f"-> {output}", file=sys.stderr)
 
 
 if __name__ == "__main__":

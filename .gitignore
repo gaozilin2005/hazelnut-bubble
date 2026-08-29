@@ -4,9 +4,14 @@ __pycache__/
 .env
 results.json
 data/catalog.jsonl
+data/catalog.jsonl.gz
+data/SHA256SUMS
 # Development proxy catalogs and their variants; rebuild with tools/build_dev_catalog.py
 data/catalog_*.jsonl
 data/releases/
+# Generated held-out sessions; regenerate with tools/gen_sessions.py --seed
+data/holdout_*.jsonl
+*.meta.json
 # Per-agent eval output from tools/run_eval.py
 results_*.json
 # Organizer-only code, private evaluation data, manifests, and build reports.
