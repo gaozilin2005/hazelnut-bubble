@@ -20,3 +20,5 @@ docs/participant_release_checklist.md
 tests/test_5core_builder.py
 tests/test_organizer_pipeline.py
 *.log
+# Local virtualenv for the optional LLM reranking stage
+.venv/
