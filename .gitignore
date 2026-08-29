@@ -4,7 +4,11 @@ __pycache__/
 .env
 results.json
 data/catalog.jsonl
+# Development proxy catalogs and their variants; rebuild with tools/build_dev_catalog.py
+data/catalog_*.jsonl
 data/releases/
+# Per-agent eval output from tools/run_eval.py
+results_*.json
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/
 secure/
