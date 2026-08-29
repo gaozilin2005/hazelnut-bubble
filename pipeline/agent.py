@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pipeline.dialog import ConversationBrain
 from pipeline.interfaces import SharedSessionState
 from pipeline.reranker import IdentityReranker, LLMReranker, LocalReranker
 from pipeline.retriever import HybridRetriever
@@ -74,8 +75,27 @@ class PipelineAgent:
         self, catalog_path: str | Path = "data/catalog.jsonl", use_prior: bool = True,
         use_dense: bool = True, reranker: str = "local", ranking_model: str | None = None,
         rerank_pool: int = RERANK_POOL, exposure_gate: bool = True,
+        ask_policy: str = "other",
     ) -> None:
+        # ask_policy selects which clarification strategy chooses ask_attribute:
+        #   "other"             -- placeholder: always ask the simulator's "other"
+        #                          wildcard, which returns up to 2 undisclosed
+        #                          constraints of any type every turn. Was the
+        #                          default while B's dialog.py (Person B) was
+        #                          unwired; kept as an ablation baseline.
+        #   "dialog_fixed"      -- Person B's ConversationBrain, FIXED_PRIORITY
+        #                          (material first, never re-asks "other").
+        #   "dialog_simulator"  -- ConversationBrain, SIMULATOR_AWARE_PRIORITY
+        #                          (asks "other" first, same wildcard insight,
+        #                          then falls through to named attributes).
+        # Only used to pick WHICH attribute to ask; retrieval still reads its
+        # own SharedSessionState.constraints from pipeline/router.py, not
+        # ConversationBrain's known_constraints -- see README for why the two
+        # state contracts are not yet merged (a real, unresolved disagreement
+        # over whether an overridden constraint should be dropped).
         self.exposure_gate = exposure_gate
+        self.ask_policy = ask_policy
+        self.dialog = ConversationBrain() if ask_policy != "other" else None
         self.retriever = HybridRetriever(use_prior=use_prior, use_dense=use_dense)
         self.retriever.build(str(catalog_path))
         self.rerank_pool = rerank_pool
@@ -96,17 +116,19 @@ class PipelineAgent:
         self.states[session_id] = SharedSessionState(
             session_id=session_id, user_profile=user_profile or {}
         )
+        if self.dialog is not None:
+            self.dialog.reset(session_id, user_profile or {})
 
-    def _ask(self, state: SharedSessionState) -> tuple[str, str | None]:
-        """PLACEHOLDER for Person B's clarification policy.
-
-        `ask_attribute="other"` is a wildcard in the simulator: it returns the
-        next two undisclosed constraints of any type, so two turns of it drain
-        the entire intent card. B should replace this with a real policy, but
-        this is the throughput ceiling to beat.
-        """
-        state.asked.append("other")
-        return "Anything else that matters for this one?", "other"
+    def _ask(self, session_id: str, state: SharedSessionState) -> tuple[str, str | None]:
+        if self.dialog is None:
+            state.asked.append("other")
+            return "Anything else that matters for this one?", "other"
+        strategy = "simulator_aware" if self.ask_policy == "dialog_simulator" else "fixed"
+        attribute = self.dialog.choose_next_attribute(session_id, strategy=strategy)
+        self.dialog.record_asked_attribute(session_id, attribute)
+        if attribute is not None:
+            state.asked.append(attribute)
+        return self.dialog.question_for(attribute), attribute
 
     def _exposure(
         self, state: SharedSessionState, ranked: list[tuple[str, float]], top_k: int
@@ -144,9 +166,11 @@ class PipelineAgent:
             state = self.states[session_id]
 
         route(state, user_message, turn)
+        if self.dialog is not None:
+            self.dialog.observe(session_id, user_message, turn)
         candidates = self.retriever.retrieve(state, CANDIDATE_POOL)
         ranked = self.reranker.rerank(state, candidates[:max(self.rerank_pool, top_k)])
-        message, attribute = self._ask(state)
+        message, attribute = self._ask(session_id, state)
 
         return {
             "message": message,
