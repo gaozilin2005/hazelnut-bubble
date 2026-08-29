@@ -47,3 +47,44 @@ def terms(text: str, keep_stopwords: bool = False) -> list[str]:
 
 def product_corpus(product: dict) -> str:
     return " ".join(flatten(product.get(field)) for field in SEARCH_FIELDS)
+
+
+# Attribute taxonomy for slot filling (Pillar II "incremental slots").
+#
+# Deliberately mirrors the simulator's own bucketing rather than importing it:
+# a submission bundle must stand alone, and depending on evaluator internals
+# would break the moment the organizer refactors them. Order matters -- the
+# first match wins, and everything unmatched is a feature.
+_ATTRIBUTE_RULES = (
+    ("budget", ("budget", "$", "under", "<=")),
+    ("material", ("cotton", "polyester", "nylon", "leather", "wool", "spandex",
+                  "silk", "rayon", "fabric")),
+    ("color", ("color", "black", "white", "blue", "red", "pink", "green")),
+    ("size", ("size", "sizing", "width", "wide", "narrow")),
+    ("style", ("department", "style", "fit", "sleeve", "neck")),
+    ("use_case", ("hiking", "running", "gym", "winter", "outdoor", "work")),
+)
+
+
+def classify_attribute(value: str) -> str:
+    """-> the attribute bucket a disclosed constraint belongs to."""
+    lowered = value.lower()
+    for attribute, needles in _ATTRIBUTE_RULES:
+        if any(needle in lowered for needle in needles):
+            return attribute
+    return "feature"
+
+
+# Concrete, human-nameable facet values for proactive clarification. A prompt may
+# only offer options it can actually see in the live candidate pool, so this is
+# deliberately a small closed vocabulary of terms that read naturally in a
+# question -- not the raw metadata snippets, which are long and often junk
+# ("\u8fdb\u53e3", "Elastic closure").
+FACET_VOCABULARY = {
+    "material": ("cotton", "polyester", "nylon", "leather", "wool", "spandex",
+                 "silk", "rayon", "denim", "fleece"),
+    "color": ("black", "white", "blue", "red", "pink", "green", "brown",
+              "grey", "purple", "yellow", "orange"),
+    "style": ("slim fit", "relaxed", "long sleeve", "short sleeve", "high waist",
+              "crew neck", "v neck", "hooded"),
+}

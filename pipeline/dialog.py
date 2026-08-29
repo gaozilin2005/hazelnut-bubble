@@ -193,21 +193,6 @@ class ConversationBrain:
         new_value = new_value.strip().rstrip(".")
         return new_value if new_value else None
     
-    def choose_next_attribute(
-        self,
-        session_id: str,
-    ) -> str | None:
-        
-        state = self.get_state(session_id)
-        for attribute in ATTRIBUTE_PRIORITY:
-            if attribute in state.asked_attributes:
-                continue
-            if attribute in state.no_preference_attributes:
-                continue
-            return attribute
-        
-        return None
-    
     def question_for(
         self,
         attribute: str | None,
@@ -298,3 +283,84 @@ class ConversationBrain:
 
         return None
     
+
+
+# --- Message composition (added during A/B integration) ---
+#
+# The evaluator reads `ask_attribute` and ignores `message` entirely
+# (customer_reply takes only the structured field; the spec says so explicitly:
+# "the simulator uses this field instead of guessing from prose"). So prose is
+# free, and it is where the brain's tracked state earns its keep: the question
+# that scores best is always the open one, but it can be phrased with full
+# knowledge of the category, what has been disclosed, and whether the customer
+# has changed their mind.
+#
+# Every template below is an OPEN question. A closed one ("what colour?") would
+# read as incoherent next to a reply about material, since the wildcard returns
+# facts of any type.
+
+OPENERS = {
+    "buying": "Got it — {category}. Beyond {known}, is there anything else that matters?",
+    "browsing": "Happy to help you explore {category}. Anything in particular you care about — fit, material, how you'll use it?",
+    "override": "Understood, {category} it is. What else should I weigh?",
+    "unknown": "Tell me a bit more about what you're after and I'll narrow it down.",
+}
+
+FOLLOWUPS = (
+    "Noted: {known}. Anything else at all — material, fit, sizing, price?",
+    "That helps. Is there anything else about these that matters to you?",
+    "Thanks. Any other detail worth factoring in — how you'll use it, or how it should fit?",
+)
+
+OVERRIDE_ACK = "Understood — I've switched to {new}. Anything else I should weigh?"
+SETTLED = "Based on everything you've told me{known}, here are my best matches."
+
+
+def _phrase(values: list[str], limit: int = 2, width: int = 34) -> str:
+    """Render disclosed constraints for display. Raw metadata can be very long."""
+    shown = [v if len(v) <= width else v[: width - 1].rstrip() + "\u2026" for v in values[:limit]]
+    if not shown:
+        return ""
+    if len(shown) == 1:
+        return shown[0]
+    return ", ".join(shown[:-1]) + " and " + shown[-1]
+
+
+# Proactive clarification: names the values the surviving candidates actually
+# disagree on, so the question guides convergence instead of restating "anything
+# else?". The offered options come from the live pool, never from a fixed script.
+FACET_PROMPTS = {
+    "material": "I'm still seeing both {first} and {second} options — does either sound right, or is something else more important?",
+    "color": "The closest matches split between {first} and {second}. Any leaning there, or does something else matter more?",
+    "style": "Some of these are {first} and some {second}. Which way are you leaning — or is there another detail I should weigh?",
+}
+
+
+def compose_message(
+    *, intent: str, category: str | None, constraints: list[str], turn: int,
+    override_new: str | None = None, settled: bool = False,
+    facet: tuple[str, list[tuple[str, int]]] | None = None,
+) -> str:
+    """Customer-facing prose for this turn. Never affects scoring.
+
+    `facet` is the attribute the live candidate pool is most divided on, as
+    computed by HybridRetriever.facet_split. When present it takes priority over
+    the generic follow-ups: naming the actual competing options is what makes the
+    prompt proactive rather than a restatement.
+    """
+    category_text = (category or "these").strip()
+    known = _phrase(constraints)
+
+    if override_new:
+        return OVERRIDE_ACK.format(new=_phrase([override_new], limit=1))
+    if settled:
+        return SETTLED.format(known=f" — {known}" if known else "")
+    if facet:
+        attribute, values = facet
+        template = FACET_PROMPTS.get(attribute)
+        if template and len(values) >= 2:
+            return template.format(first=values[0][0], second=values[1][0])
+    if turn <= 1 or not known:
+        template = OPENERS.get(intent, OPENERS["unknown"])
+        return template.format(category=category_text, known=known or "what you have said")
+    return FOLLOWUPS[(turn - 2) % len(FOLLOWUPS)].format(known=known)

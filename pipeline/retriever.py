@@ -29,7 +29,7 @@ from pipeline.interfaces import (
     INTENT_BROWSING,
     SharedSessionState,
 )
-from pipeline.textutil import normalize, product_corpus, terms
+from pipeline.textutil import FACET_VOCABULARY, normalize, product_corpus, terms
 
 BUDGET_RE = re.compile(r"budget around \$?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
 EXCLUDED_CATEGORIES = {"clothing", "clothing shoes & jewelry", "clothing, shoes & jewelry"}
@@ -110,6 +110,7 @@ class HybridRetriever:
         # oracle. Toggle it off to measure how much score is real signal.
         self.use_prior = use_prior
         self.asins: list[str] = []
+        self.position: dict[str, int] = {}
         self.corpora: list[str] = []
         self.prices: list[float | None] = []
         self.priors: list[float] = []
@@ -128,6 +129,7 @@ class HybridRetriever:
                 product = json.loads(line)
                 index = len(self.asins)
                 self.asins.append(str(product["parent_asin"]))
+                self.position[str(product["parent_asin"])] = index
                 corpus = normalize(product_corpus(product))
                 self.corpora.append(corpus)
 
@@ -305,6 +307,56 @@ class HybridRetriever:
             if len(kept) >= limit:
                 return kept
         return (kept + overflow)[:limit]
+
+    def facet_split(
+        self, candidate_ids: list[str], pool: int = 60, minimum_share: float = 0.12,
+        skip_attributes: set[str] | None = None, disclosed: str = "",
+    ) -> tuple[str, list[tuple[str, int]]] | None:
+        """-> the facet that best divides the live candidate pool, and its top values.
+
+        This is the signal behind proactive clarification: rather than asking
+        "anything else?", ask about the attribute on which the surviving
+        candidates actually disagree. A facet where 92% of candidates say nothing
+        splits nothing; one at 60/34 splits well.
+
+        Returns None when no facet divides the pool -- then there is nothing
+        concrete to offer and the caller should fall back to an open question.
+        """
+        window = candidate_ids[:pool]
+        if len(window) < 4:
+            return None
+        corpora = [
+            self.corpora[self.position[asin]] for asin in window
+            if asin in self.position
+        ]
+        if not corpora:
+            return None
+
+        skip_attributes = skip_attributes or set()
+        best: tuple[float, str, list[tuple[str, int]]] | None = None
+        for attribute, vocabulary in FACET_VOCABULARY.items():
+            # Never re-offer a facet already put to the customer, and never offer
+            # a value they have already stated -- both read as not listening.
+            if attribute in skip_attributes:
+                continue
+            counts = [
+                (value, sum(1 for text in corpora if value in text))
+                for value in vocabulary if value not in disclosed
+            ]
+            present = [
+                (value, count) for value, count in counts
+                if count / len(corpora) >= minimum_share
+            ]
+            if len(present) < 2:
+                continue
+            present.sort(key=lambda item: item[1], reverse=True)
+            # Balance, not volume: two values at 50/50 divide the pool better
+            # than one at 90% and another at 15%.
+            top, second = present[0][1], present[1][1]
+            balance = second / top
+            if best is None or balance > best[0]:
+                best = (balance, attribute, present[:2])
+        return (best[1], best[2]) if best else None
 
     def retrieve(self, state: SharedSessionState, k: int) -> list[str]:
         """Route -> gather candidates -> rank.
