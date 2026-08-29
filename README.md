@@ -60,6 +60,14 @@ Whether an intent-override should *erase* the customer's earlier stated preferen
 
 ## Setup and Installation
 
+**Every command in this document is run from the repository root** — all paths are relative
+to it.
+
+```bash
+cd /path/to/hazelnut-bubble
+ls   # you should see: pipeline/  tools/  data/  evaluator/  starter/
+```
+
 Requires Python 3.10+ and `numpy` (everything else is standard library).
 
 ```bash
@@ -68,13 +76,24 @@ pip install numpy
 
 Download the official frozen catalog from the organizer's participant-kit release and verify it:
 
+Note the release is on the **organizer's** repo, not this fork.
+
 ```bash
-gh release download participant-kit -R TechJam2026/techjam-conversational-search \
-  -p 'catalog.jsonl.gz' -p 'SHA256SUMS' -D data/releases/
-(cd data/releases && shasum -a 256 -c SHA256SUMS)   # verify before trusting the file
-gzip -dc data/releases/catalog.jsonl.gz > data/catalog.jsonl
-wc -l data/catalog.jsonl   # expect 50000
+cd /path/to/hazelnut-bubble        # all paths below are relative to the repo root
+
+BASE=https://github.com/TechJam2026/techjam-conversational-search/releases/download/participant-kit
+curl -sSL -o data/catalog.jsonl.gz "$BASE/catalog.jsonl.gz"
+curl -sSL -o data/SHA256SUMS       "$BASE/SHA256SUMS"
+
+# SHA256SUMS lists bare filenames, so `shasum -c` must run from the directory holding them.
+# The parentheses make that a subshell, so your own shell stays at the repo root.
+(cd data && shasum -a 256 -c <(grep catalog.jsonl.gz SHA256SUMS))   # -> catalog.jsonl.gz: OK
+
+gzip -dk data/catalog.jsonl.gz     # -k keeps the .gz so you can re-verify without re-downloading
+wc -l data/catalog.jsonl           # expect 50000
 ```
+
+Do not skip the checksum — every number in this document assumes that exact file.
 
 ## Reproducing Our Results
 
@@ -89,7 +108,13 @@ python3 tools/run_eval.py --agent pipeline --no-exposure-gate
 python3 tools/run_eval.py --agent baseline
 ```
 
-Each writes `results_<agent>.json`. Ablation flags for every component: `--no-dense`, `--no-prior`, `--reranker {local,llm,identity}`, `--no-exposure-gate`.
+Each writes `results_<agent>_<dataset>.json`, opening with a `provenance` block recording the
+commit, branch, whether the tree was dirty, the dataset and every flag — so a results file can
+always answer "what produced this, and is it current?".
+
+Ablation flags for every component: `--no-dense`, `--no-prior`,
+`--reranker {local,llm,identity}`, `--no-exposure-gate`, `--erase-on-override`, and
+`--dialog {integrated,wildcard,silent,drain,brain-simulator,brain-fixed}`.
 
 Paraphrase-robustness sweep (rewords the simulator's messages at five increasing strengths):
 
@@ -141,6 +166,47 @@ In other words: on every dataset we tested, whenever this system is confident, i
 
 We kept the gate enabled by default — it is a real, defensible product behavior under the stated scoring rules, its cost is now measured rather than assumed, and disabling it is one documented flag away. We'd rather you make this call informed than have us make it for you.
 
+## The Clarification Channel Has a Dominant Strategy
+
+The brief asks for "adaptive clarification and question-value estimation" (Pillar II). We
+built it, measured it against a trivial baseline, and found it **unrewardable by
+construction** — which we think is a more useful result than a tuned priority list.
+
+`ask_attribute` is a structured field, and `customer_reply` matches on it like this:
+
+```python
+if value not in disclosed and (attribute == "other" or classify_constraint(value) == attribute)
+```
+
+`attribute == "other"` short-circuits the type check, so `other`'s match set is a strict
+**superset** of every named attribute's. It returns any two undisclosed constraints; "what
+colour?" returns only constraints that classify as colour, and most products have none. An
+intent card holds at most 4 constraints and the simulator discloses at most 2 per turn, so
+`other` achieves full disclosure in two turns — the floor.
+
+Measured on 1,000 held-out sessions, identical retrieval and ranking throughout:
+
+| `--dialog` | what it asks | TechnicalScore |
+|---|---|---|
+| `integrated` (default) | `other`, with composed prose | **0.9072** |
+| `wildcard` | `other`, fixed prose | 0.9072 |
+| `drain` | `other` until it stops yielding, then stops | 0.9051 |
+| `brain-simulator` | `other` first, then named attributes | 0.8684 |
+| `brain-fixed` | named attributes first | 0.8355 |
+| `silent` | asks nothing at all | 0.3084 |
+
+Two things follow. **Questioning is worth +0.60** — the dialog layer is most of the score.
+And **no question ordering beats always asking `other`**: we built the state-aware version
+(`drain`) specifically to test whether it could, and it ties rather than wins, because once
+`other` returns nothing every constraint is already disclosed and no named attribute can
+extract more.
+
+So the default keeps `other` and puts B's tracked state where it is not dominated: the
+`message` field, which the evaluator never reads. Prompts are composed from the live
+candidate pool's most-divided facet — *"I'm still seeing both polyester and spandex options
+— does either sound right?"* — never repeating a facet, and never offering a value the
+customer has already stated. Identical score, a transcript worth reading.
+
 ## Held-Out Generalization Check
 
 Every number in the Results table comes from the 200 public sessions, which every design decision in this repository was tuned and measured against. Two independently-built tools check generalization to catalog products that were **never** a public target, both reusing the evaluator's own session-generation logic (`materialize_hidden_fields`) — the identical mechanism the organizer uses to build the 800 private sessions:
@@ -170,6 +236,30 @@ Four separate attempts to add a ranking signal on top of the existing (already-s
 - **Leave-one-out constraint tolerance** (dropping a session's worst-matching constraint, to tolerate one being wrong): −0.007. Letting incorrect products also drop their worst constraint dilutes discrimination more than it rescues the occasional session hurt by one bad constraint.
 - **Hard-filtering buying/override candidates on their disclosed constraints**, rather than the current soft-weighted scoring — a more literal reading of the brief's "apply slot hard-filters aggressively" for the buying track. Filtering on just the first constraint was a no-op (identical to no filter, to 4 decimals): the existing soft scoring already suppresses non-matching candidates almost as effectively as exclusion would. Filtering on *every* disclosed constraint was actively worse (−0.004), for the same reason leave-one-out matters — an intent-override session's old and new constraint wording doesn't always both appear verbatim in the target's own text, so requiring literal containment of both can exclude the true target.
 - **Amplifying the weight of the customer's first-stated ("key requirement") constraint** for buying/override sessions, at 1.5×–5×: no effect at any multiplier. The candidates within a category bucket for a common single-word constraint (e.g. "cotton") mostly already share full coverage on it, so scaling its weight doesn't discriminate between them — the ambiguity lives elsewhere, which is what led to the exposure-gate rework above.
+
+- **Attribute-by-attribute clarification** (Pillar II's "adaptive clarification"): −0.039 on
+  held-out, and the margin *widens* out of sample (−0.020 on public). `ask_attribute="other"`
+  dominates every named attribute by construction — see
+  [The Clarification Channel Has a Dominant Strategy](#the-clarification-channel-has-a-dominant-strategy).
+- **Intent-override slot erasure** (Pillar II's "slot erasure and rewriting", `--erase-on-override`):
+  −0.006 on held-out, and override-scenario MRR 0.834 → 0.763. The simulator draws `old_value`
+  and `new_value` from the *same* intent card (`behavior_for`), so the two never truly conflict
+  and erasing discards a valid retrieval signal. The brief asks for a mechanism this benchmark
+  punishes; we implemented it, measured it, and left it behind a flag.
+- **Widening the reranker's pool** (10 → 200 candidates): no gain at any width, and mildly
+  negative past 100. Notable because 29 of our 38 remaining misses sit at rank 11–50 — the
+  retriever *finds* them and nothing promotes them, so that headroom is real but needs a
+  ranking signal we do not currently have. The local reranker is worth ~nothing on its own
+  (identity 0.9091 vs local 0.9087 on the tuning draw).
+- **Exposure-schedule sweep** (15 configurations of withheld-count × release-turn, on a
+  separate `--seed 7` draw): the current setting is already optimal. The best candidate looked
+  +0.0005 better on the tuning draw and did **not** replicate on the clean set — a result we
+  would have reported as a gain had we swept on the reporting set.
+- **The popularity prior is a public-set overfit.** Disabling it is +0.0066 on the public set
+  but −0.002 on catalog-representative draws (6/6 draws, paired). The public targets are
+  unusually popular, so a popularity prior fits that sampling artifact rather than improving
+  retrieval. Left enabled by default, but it is a judgement call about whether the private 800
+  resemble the public 200 — and the catalog arithmetic above suggests they cannot.
 
 We kept this code in the repository, disabled by measured constant rather than deleted, because a negative result with a number attached is more useful to future work — and to a reviewer asking "did you consider X?" — than no result at all.
 

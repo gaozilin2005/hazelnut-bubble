@@ -115,6 +115,7 @@ def main() -> None:
             "reranker": args.reranker if args.agent == "pipeline" else None,
             "dialog": args.dialog if args.agent == "pipeline" else None,
             "erase_on_override": args.erase_on_override,
+            "exposure_gate": not args.no_exposure_gate,
             "use_prior": not args.no_prior,
             "use_dense": not args.no_dense,
             "limit": args.limit or None,
@@ -132,6 +133,9 @@ def main() -> None:
     # silently destroyed the first.
     suffix = f"_{args.dialog}" if args.agent == "pipeline" and args.dialog != "integrated" else ""
     suffix += "_erase" if args.erase_on_override else ""
+    # Any flag that changes the score must change the filename, or one run
+    # silently overwrites another. This one was missed once already.
+    suffix += "_ungated" if args.no_exposure_gate else ""
     output = Path(
         args.output or f"results_{args.agent}_{Path(args.dataset).stem}{suffix}.json"
     )
