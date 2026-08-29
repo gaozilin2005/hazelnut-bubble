@@ -17,9 +17,10 @@ CANDIDATE_POOL = 200
 
 class PipelineAgent:
     def __init__(
-        self, catalog_path: str | Path = "data/catalog.jsonl", use_prior: bool = True
+        self, catalog_path: str | Path = "data/catalog.jsonl", use_prior: bool = True,
+        use_dense: bool = True,
     ) -> None:
-        self.retriever = HybridRetriever(use_prior=use_prior)
+        self.retriever = HybridRetriever(use_prior=use_prior, use_dense=use_dense)
         self.retriever.build(str(catalog_path))
         self.reranker = IdentityReranker()
         self.states: dict[str, SharedSessionState] = {}

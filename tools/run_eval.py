@@ -19,10 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 
 
-def make_agent(name: str, catalog: str, use_prior: bool = True):
+def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool = True):
     if name == "pipeline":
         from pipeline.agent import PipelineAgent
-        return PipelineAgent(catalog, use_prior=use_prior)
+        return PipelineAgent(catalog, use_prior=use_prior, use_dense=use_dense)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -36,6 +36,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="first N sessions only")
     parser.add_argument("--no-prior", action="store_true",
                         help="disable the popularity prior (confound check)")
+    parser.add_argument("--no-dense", action="store_true",
+                        help="disable the dense vector route (ablation)")
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
@@ -44,7 +46,8 @@ def main() -> None:
     catalog_ids, categories, products = catalog_index(args.catalog)
 
     started = time.perf_counter()
-    agent = make_agent(args.agent, args.catalog, use_prior=not args.no_prior)
+    agent = make_agent(args.agent, args.catalog, use_prior=not args.no_prior,
+                       use_dense=not args.no_dense)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()

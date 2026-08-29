@@ -22,7 +22,13 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from pipeline.interfaces import SharedSessionState
+import numpy as np
+
+from pipeline.dense import DenseIndex
+from pipeline.interfaces import (
+    INTENT_BROWSING,
+    SharedSessionState,
+)
 from pipeline.textutil import normalize, product_corpus, terms
 
 BUDGET_RE = re.compile(r"budget around \$?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
@@ -32,6 +38,29 @@ EXCLUDED_CATEGORIES = {"clothing", "clothing shoes & jewelry", "clothing, shoes 
 PHRASE_BONUS = 3.0
 PRICE_BONUS = 2.0
 UNFILTERED_CANDIDATES = 400
+# Dual-track routing, settled by measurement rather than assumption.
+#
+# Once ANY constraint has been disclosed, the lexical track owns ranking. A
+# disclosed constraint is a verbatim slice of the target's own metadata, so
+# exact matching identifies the item outright; fusing dense similarity in is
+# monotonically harmful (0.8802 lexical-only, 0.8783 at RRF weight 0.05, down
+# to 0.8464 at 0.35) because it supplies plausible neighbours that outrank the
+# true target.
+#
+# Before any constraint is disclosed -- the open-ended browsing cold start --
+# lexical has nothing to match and falls back to popularity. There the dense
+# track is decisively better: browsing MRR 0.465 -> 0.761, overall 0.8802 ->
+# 0.9119. Dense also supplies candidates when the category filter finds no
+# bucket at all.
+DENSE_CANDIDATES = {
+    "buying":   150,   # hard requirements stated: filter track leads, narrow net
+    "override": 150,
+    "browsing": 400,   # opens vague: cast wide for cross-category coverage
+    "unknown":  400,
+}
+# Browsing is diversity-first: cap any one brand so the shortlist spans the
+# category instead of ten variants of one product.
+MAX_PER_STORE_BROWSING = 3
 # Reverse containment: a product's own attribute string found inside the user's
 # text. Recovers the verbatim-quote signal no matter how the message is worded.
 SNIPPET_BONUS = 2.5
@@ -60,7 +89,10 @@ def coarse_category(values: list[str]) -> str:
 class HybridRetriever:
     """Retriever protocol. Owns Hit@10."""
 
-    def __init__(self, use_prior: bool = True) -> None:
+    def __init__(self, use_prior: bool = True, use_dense: bool = True) -> None:
+        self.use_dense = use_dense
+        self.dense = DenseIndex()
+        self.stores: list[str] = []
         # The popularity prior is a legitimate tie-breaker, but on a dev catalog
         # whose distractors are less-reviewed than the targets it behaves like an
         # oracle. Toggle it off to measure how much score is real signal.
@@ -109,6 +141,7 @@ class HybridRetriever:
                     [text for text in dict.fromkeys(snippets) if len(text) >= MIN_SNIPPET_CHARS]
                 )
 
+                self.stores.append(normalize(str(product.get("store") or "")))
                 categories = [str(value) for value in product.get("categories") or []]
                 self.buckets[normalize(coarse_category(categories))].append(index)
 
@@ -121,6 +154,8 @@ class HybridRetriever:
             token: math.log(1.0 + total / (1.0 + count))
             for token, count in document_frequency.items()
         }
+        if self.use_dense:
+            self.dense.build(self.corpora)
 
     # -- candidate selection -------------------------------------------------
 
@@ -224,10 +259,65 @@ class HybridRetriever:
             total += coverage * math.log1p(mass)
         return total
 
+    def _query_text(self, state: SharedSessionState) -> str:
+        """What the dense route searches for: the disclosed constraints, plus the
+        category, which is the only signal a browsing session opens with."""
+        parts = list(state.constraints)
+        if state.category:
+            parts.append(state.category)
+        return " ".join(parts) if parts else " ".join(state.messages)
+
+    def _diversify(self, ordered: list[int], limit: int) -> list[int]:
+        kept: list[int] = []
+        seen: dict[str, int] = {}
+        overflow: list[int] = []
+        for index in ordered:
+            store = self.stores[index]
+            if store and seen.get(store, 0) >= MAX_PER_STORE_BROWSING:
+                overflow.append(index)
+                continue
+            seen[store] = seen.get(store, 0) + 1
+            kept.append(index)
+            if len(kept) >= limit:
+                return kept
+        return (kept + overflow)[:limit]
+
     def retrieve(self, state: SharedSessionState, k: int) -> list[str]:
+        """Route -> gather candidates -> rank.
+
+        Filter track (buying/override): the exact category bucket, precision-first.
+        Dense track: engaged when the filter track yields nothing -- a reworded or
+        unrecognised category -- where it recovers recall the lexical route cannot.
+        """
         candidates = self._bucket(state)
         if candidates is None:
-            candidates = self._by_token_mass(state, UNFILTERED_CANDIDATES)
-        blob = self._blob(state)
-        ordered = sorted(candidates, key=lambda index: (-self.score(index, state, blob), index))
+            widened = set(self._by_token_mass(state, UNFILTERED_CANDIDATES))
+            if self.use_dense:
+                width = DENSE_CANDIDATES.get(state.intent, DENSE_CANDIDATES["unknown"])
+                similarity = self.dense.similarity(self._query_text(state))
+                widened.update(int(i) for i in np.argsort(-similarity)[:width])
+            candidates = sorted(widened)
+
+        if self.use_dense and state.turn <= 1 and not state.constraints:
+            # Dense track, opening turn only. The customer has said nothing but a
+            # category, so there is nothing to match literally and popularity is
+            # the only lexical signal left.
+            #
+            # The guard is on the TURN, not merely on constraints being empty:
+            # if message parsing fails, constraints stay empty for the whole
+            # session, and keying off that alone strands every later turn in the
+            # dense track while the lexical route could have matched the payload
+            # still sitting verbatim in the raw message. Measured: that mistake
+            # cost 0.800 -> 0.543 at paraphrase level L1.
+            array = np.asarray(candidates)
+            similarity = self.dense.similarity(self._query_text(state), array)
+            ordered = [int(array[i]) for i in np.argsort(-similarity)]
+        else:
+            # Filter track: rank by literal constraint matching.
+            blob = self._blob(state)
+            ordered = sorted(
+                candidates, key=lambda index: (-self.score(index, state, blob), index)
+            )
+        if state.intent == INTENT_BROWSING:
+            ordered = self._diversify(ordered, max(k, 1))
         return [self.asins[index] for index in ordered[:k]]

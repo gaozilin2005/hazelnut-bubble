@@ -146,13 +146,15 @@ def main() -> None:
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--dataset", default="data/public_set.jsonl")
     parser.add_argument("--levels", default="0,1,2,3,4")
+    parser.add_argument("--no-dense", action="store_true",
+                        help="disable the dense recall route (ablation)")
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
     catalog_ids, categories, products = catalog_index(args.catalog)
     if args.agent == "pipeline":
         from pipeline.agent import PipelineAgent
-        agent = PipelineAgent(args.catalog)
+        agent = PipelineAgent(args.catalog, use_dense=not args.no_dense)
     else:
         from starter.agent import Agent
         agent = Agent(args.catalog)
