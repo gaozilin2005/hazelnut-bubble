@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 
-from pipeline.textutil import normalize, terms
+from pipeline.textutil import FACET_VOCABULARY, normalize, terms
 
 
 def merge_redundant(constraints: list[str]) -> list[str]:
@@ -110,3 +110,42 @@ def live_discriminance(
         return {c: 1.0 for c in constraints}
     scale = len(raw) / total
     return {c: w * scale for c, w in raw.items()}
+
+
+def rejected_aspect_penalty(
+    rejected_corpora: list[str], disclosed: str
+) -> dict[str, float]:
+    """Aspect-value evidence extracted from items the customer has rejected.
+
+    `--no-repeat` treats a rejection as ITEM-level information: this exact
+    product is not the target, so stop showing it. Bi et al., "Conversational
+    Product Search Based on Negative Feedback" (CIKM 2019, arXiv:1909.02071),
+    report that decomposing the same rejection into fine-grained aspect-value
+    pairs beats item-level negative feedback, because "more information is
+    available to help clarify users' intents" -- a rejected black nylon jacket
+    is weak evidence against black, and against nylon, not merely against that
+    one listing.
+
+    Returns {value: share-of-rejections-exhibiting-it}. A value the customer
+    explicitly asked for is never penalised: they said they want it, so its
+    presence among rejected items says nothing about the target.
+
+    Classical relevance feedback weights negative evidence far below positive
+    (Rocchio's gamma is typically 0.2 against beta 0.8) because human relevance
+    judgements are noisy. Ours are not -- a session that reached turn N proves
+    the evaluator found no target in turns 1..N-1 -- so the caller controls the
+    weight and it is measured rather than inherited.
+    """
+    if not rejected_corpora:
+        return {}
+    disclosed_text = normalize(disclosed)
+    shares: dict[str, float] = {}
+    total = len(rejected_corpora)
+    for values in FACET_VOCABULARY.values():
+        for value in values:
+            if value in disclosed_text:
+                continue
+            hits = sum(1 for corpus in rejected_corpora if value in corpus)
+            if hits:
+                shares[value] = hits / total
+    return shares

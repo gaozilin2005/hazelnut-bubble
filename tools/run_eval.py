@@ -24,16 +24,17 @@ from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool = True,
                reranker: str = "local", ranking_model: str | None = None,
                exposure_gate: bool = True, dialog: str = "integrated",
-               erase_on_override: bool = False, tie_break_dense: bool = False,
-               distill: bool = False, no_repeat: bool = False):
+               erase_on_override: bool = False, distill: bool = False,
+               no_repeat: bool = False, neg_aspects: float = 0.0,
+               tie_break_dense: bool = False):
     if name == "pipeline":
         from pipeline.agent import PipelineAgent
         return PipelineAgent(catalog, use_prior=use_prior, use_dense=use_dense,
                              reranker=reranker, ranking_model=ranking_model,
                              exposure_gate=exposure_gate, dialog=dialog,
-                             erase_on_override=erase_on_override,
-                             tie_break_dense=tie_break_dense,
-                             distill=distill, no_repeat=no_repeat)
+                             erase_on_override=erase_on_override, distill=distill,
+                             no_repeat=no_repeat, neg_aspects=neg_aspects,
+                             tie_break_dense=tie_break_dense)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -79,6 +80,9 @@ def main() -> None:
                                  "brain-simulator", "brain-fixed", "dynamic"),
                         help="question policy: wildcard is the placeholder baseline; "
                              "brain-* use pipeline/dialog.py (B)")
+    parser.add_argument("--neg-aspects", type=float, default=0.0,
+                        help="aspect-level negative feedback weight (Bi et al. "
+                             "CIKM 2019); 0 disables. Implies rejection tracking")
     parser.add_argument("--no-repeat", action="store_true",
                         help="Pillar III adaptive orchestration: demote candidates "
                              "already shown and rejected in this session; off by "
@@ -121,8 +125,9 @@ def main() -> None:
                        ranking_model=args.ranking_model,
                        exposure_gate=not args.no_exposure_gate,
                        dialog=args.dialog, erase_on_override=args.erase_on_override,
-                       tie_break_dense=args.tie_break_dense,
-                       distill=args.distill, no_repeat=args.no_repeat)
+                       distill=args.distill, no_repeat=args.no_repeat,
+                       neg_aspects=args.neg_aspects,
+                       tie_break_dense=args.tie_break_dense)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()
@@ -139,6 +144,8 @@ def main() -> None:
             "erase_on_override": args.erase_on_override,
             "distill": args.distill,
             "no_repeat": args.no_repeat,
+            "neg_aspects": args.neg_aspects,
+            "tie_break_dense": args.tie_break_dense,
             "exposure_gate": not args.no_exposure_gate,
             "use_prior": not args.no_prior,
             "use_dense": not args.no_dense,
@@ -159,6 +166,8 @@ def main() -> None:
     suffix += "_erase" if args.erase_on_override else ""
     suffix += "_distill" if args.distill else ""
     suffix += "_norepeat" if args.no_repeat else ""
+    suffix += f"_neg{args.neg_aspects:g}" if args.neg_aspects else ""
+    suffix += "_tiebreak" if args.tie_break_dense else ""
     # Any flag that changes the score must change the filename, or one run
     # silently overwrites another. This one was missed once already.
     suffix += "_ungated" if args.no_exposure_gate else ""

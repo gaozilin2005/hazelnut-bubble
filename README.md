@@ -232,6 +232,53 @@ Four LLM reranker variants, all live-tested on `claude-haiku-4-5` against the 20
 
 **Fourth: widen the tournament to top-3**, hypothesizing that `public_0178` — still a miss under `pairwise_llm` — was one slot out of pairwise's reach. It measured worse (−0.0022, two new demotions, zero rescues), and checking *why* closed the question rather than raising a fifth attempt: the target sits at raw retriever rank **10** on the turn that matters, not rank 3. No sequential tournament of small width can reach that without approaching the cost and failure profile of the full listwise reconsideration already measured worse above. Person C's independent finding under [What We Tried and Rejected](#what-we-tried-and-rejected) — 29 of 38 remaining misses sit at rank 11–50, found by the retriever but promoted by nothing — describes the same structural gap at full scale: it is not one session's quirk, and closing it needs a different mechanism than reranking the top few candidates.
 
+## Pillar III: Self-Evolution (Dynamic Context Programming)
+
+The brief asks for two things under Pillar III — *Runtime Adaptation* ("Personalized Context Distillation, continuously updating short-term session states and long-term user profiles") and *Adaptive Orchestration* ("runtime workflow re-orchestration and strategy alignment"). The repo's own spec phrases the same pair as "dynamic context construction" and "failure detection, strategy switching". Three mechanisms exist, split across two people:
+
+**Long-term memory, question channel (Person B, `--dialog dynamic`).** `DynamicPolicy` keeps `attribute_stats` on the agent object, which the evaluator constructs once and reuses across every session — so it accumulates evidence about which question attributes actually yield disclosure, and carries it between sessions. That is the "long-term" half of runtime adaptation.
+
+**Context distillation, retrieval channel (`--distill`, `pipeline/distill.py`).** Before this, `state.constraints` was an append-only log: every disclosed string kept forever, scored independently, never merged or reweighted. Two operations, following the ADD/MERGE/DELETE shape that agent-memory systems converge on ([self-evolving agent survey, arXiv:2507.21046](https://arxiv.org/html/2507.21046v4)) — ADD and DELETE already existed (the router appends; `erase_superseded` deletes), so what was missing was MERGE:
+
+- `merge_redundant()` collapses constraints restating one fact. A real traced session disclosed both `"leather"` and `"100% Leather"` — one fact scored twice, so a product naming leather twice outranked one naming it once as precisely.
+- `live_discriminance()` reweights by self-information `−log₂(p)` over the **live candidate pool** rather than global catalog IDF. Global IDF asks "how rare is this word in the catalog"; after a category filter has run, that is the wrong question — inside "women's leather riding boots" *every* candidate says leather, so it is globally rare and locally worthless.
+
+**Adaptive orchestration (`--no-repeat`).** Failure detection plus strategy switch. If a session reached turn N, the evaluator found no target in turns 1..N−1, so those items are confirmed negatives; re-showing them is the closed feedback loop the [conversational-recommender survey](https://www.sciencedirect.com/science/article/pii/S2666651021000164) describes ("when a user rejects a recommendation, the system stays at the same vertex"). Rejected candidates are demoted — *demoted, not filtered*, so an all-seen list still returns ten results rather than going empty.
+
+**Aspect-level negative feedback (`--neg-aspects W`).** The same rejection signal, used for far more. Bi et al., ["Conversational Product Search Based on Negative Feedback"](https://arxiv.org/abs/1909.02071) (CIKM 2019), report that decomposing a rejection into fine-grained **aspect-value pairs** significantly beats *item-level* negative feedback — and `--no-repeat` is exactly that item-level baseline. A rejected black nylon jacket is evidence against *black* and against *nylon*, not merely against that one listing. Each rejected item is decomposed over `FACET_VOCABULARY`, and candidates sharing those values are penalised in proportion to how many rejections exhibited them. Values the customer explicitly disclosed are never penalised: they asked for it, so its presence among rejects says nothing.
+
+Classical Rocchio weights negative evidence far below positive (γ≈0.2 against β≈0.8) because human relevance judgements are noisy. Ours are not — reaching turn N *proves* the evaluator found no target earlier — so the weight was swept rather than inherited, and the response is flat from W=1 to W=8.
+
+### Measured
+
+Each flag alone against the shared baseline, on four draws — the public set, the 1,000-session broad held-out, and two *independently seeded* 200-session held-out draws:
+
+| | public | held-1000 | held-200 (s.20260829) | held-200 (s.7) |
+|---|---|---|---|---|
+| baseline (shipped default) | **0.9538** | 0.8545 | 0.8452 | 0.8404 |
+| `--distill` | 0.9534 | 0.8529 | 0.8464 | — |
+| `--no-repeat` | 0.9540 | 0.8574 | 0.8472 | 0.8412 |
+| `--neg-aspects 1.0` | 0.9538 | 0.8711 | 0.8568 | 0.8544 |
+| **`--no-repeat --neg-aspects 1.0`** | 0.9538 | **0.8737** | — | **0.8585** |
+
+**Distillation is a clean null** — −0.0004 / −0.0016 / +0.0012, mixed signs. Worth more than a single-draw result precisely because three independent draws agree there is no effect.
+
+**Item-level orchestration is a small, safe positive** — +0.0002 / +0.0029 / +0.0020, never negative, exactly baseline at every paraphrase level. Its ceiling is structural: `ranked` is `candidates[:max(rerank_pool, top_k)]`, the top ten only, so demotion reorders what was already going to be shown and can never reach rank 11+.
+
+**Aspect-level negative feedback is the substantial one, and it replicates.** +0.0166 / +0.0116 / +0.0140 across three held-out draws, two of them independently seeded and never tuned against. Roughly 5× item-level demotion, exactly the direction Bi et al. predict. Unlike everything else measured in this repository, the gain is **Hit@10, not reordering**:
+
+| W | Hit@10 | MRR | MTTC | Score |
+|---|---|---|---|---|
+| 0.0 | 0.9620 | 0.6741 | 2.43 | 0.8545 |
+| 1.0 | **0.9830** | 0.6837 | **2.27** | 0.8711 |
+| 8.0 | 0.9800 | 0.6944 | 2.33 | 0.8718 |
+
+**+21 targets found per 1,000 sessions**, with MRR up *and* MTTC faster — all three metrics moving the right way at once, which nothing else here has managed. It also **improves paraphrase robustness at every level** (L1 +0.0114, L2 +0.0143, L3 +0.0060, L4 +0.0064, L0 exactly neutral), and the two mechanisms compose: together +0.0192 / +0.0181.
+
+The public set is unmoved because it is saturated — Hit@10 is already 1.000 ungated, so there are no missed targets left to find there. That divergence is the point: the held-out draws are the ones that resemble the private 800.
+
+Both flags nevertheless ship **OFF**, pending a team decision on flipping the default. W=1.0 is a round value in the middle of a flat plateau rather than the argmax; W=2.0 measured marginally better on all three draws (+0.001–0.003), which is inside the plateau and not worth tuning to.
+
 ## Held-Out Generalization Check
 
 Every number in the Results table comes from the 200 public sessions, which every design decision in this repository was tuned and measured against. Two independently-built tools check generalization to catalog products that were **never** a public target, both reusing the evaluator's own session-generation logic (`materialize_hidden_fields`) — the identical mechanism the organizer uses to build the 800 private sessions:

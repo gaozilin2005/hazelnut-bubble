@@ -25,7 +25,11 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.dense import DenseIndex
-from pipeline.distill import live_discriminance, merge_redundant
+from pipeline.distill import (
+    live_discriminance,
+    merge_redundant,
+    rejected_aspect_penalty,
+)
 from pipeline.interfaces import (
     INTENT_BROWSING,
     SharedSessionState,
@@ -134,9 +138,16 @@ class HybridRetriever:
         tie_break_dense: bool = False, tie_break_margin: float = TIE_BREAK_MARGIN,
         distill: bool = False,
     ) -> None:
-        # Pillar III context distillation (--distill). Restored after the #11/#12/#13
-        # merge dropped it from the signature while keeping the body that reads it.
+        # Pillar III context distillation (--distill): merge redundant
+        # constraints, then weight each by how much it narrows the LIVE
+        # candidate pool rather than by global catalog IDF. See
+        # pipeline/distill.py. Off by default; measured, see README.
         self.distill = distill
+        self._weights: dict[str, float] = {}
+        # Aspect-level negative feedback (--neg-aspects), set per turn by the
+        # agent from the items this session has already had rejected.
+        self.neg_weight: float = 0.0
+        self._neg: dict[str, float] = {}
         self.use_dense = use_dense
         self.tie_break_dense = tie_break_dense
         self.tie_break_margin = tie_break_margin
@@ -320,9 +331,23 @@ class HybridRetriever:
         present = self.tagsets[index]
         return PROFILE_WEIGHT * (sum(1 for t in tags if t in present) / len(tags))
 
+    def set_rejected(self, rejected_asins: list[str], disclosed: str) -> None:
+        """Decompose this session's rejections into aspect-value evidence."""
+        corpora = [
+            self.corpora[self.position[a]] for a in rejected_asins if a in self.position
+        ]
+        self._neg = rejected_aspect_penalty(corpora, disclosed)
+
     def score(self, index: int, state: SharedSessionState, blob: str = "") -> float:
         corpus = self.corpora[index]
         total = self.priors[index] + self._profile_bonus(index, state)
+        if self.neg_weight and self._neg:
+            # Aspect-level negative feedback: subtract evidence shared with
+            # rejected items. Item-level demotion (--no-repeat) only moves the
+            # exact rejected listing; this generalises to its attributes.
+            total -= self.neg_weight * sum(
+                share for value, share in self._neg.items() if value in corpus
+            )
         # Reverse containment. At L0 this agrees with constraint matching; when
         # the wrapper text is reworded it is the signal that still fires,
         # because the quoted attribute itself is usually left intact.
