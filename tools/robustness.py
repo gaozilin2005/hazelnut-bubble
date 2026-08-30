@@ -33,6 +33,7 @@ quoted product attribute. L5 is the pessimistic bound.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import re
@@ -151,11 +152,25 @@ PRISTINE_INITIAL = harness.initial_message
 PRISTINE_REPLY = harness.customer_reply
 
 
+def _message_rng(seed: int, level: int, text: str) -> random.Random:
+    """Deterministic rng PER MESSAGE, derived from the template text itself.
+
+    A single shared stream would make the realized paraphrase of session N
+    depend on how many messages sessions 1..N-1 rendered -- i.e. on the
+    AGENT'S behavior. Two agent configurations would then be scored against
+    different paraphrases, and their delta would mix the code change with
+    resampling noise. Hashing the pristine template text instead means the
+    same session always gets the same paraphrase at a given level, whatever
+    ran before it: cross-config comparisons are paired by construction.
+    """
+    digest = hashlib.sha256(f"{seed}:{level}:{text}".encode("utf-8")).digest()
+    return random.Random(int.from_bytes(digest[:8], "big"))
+
+
 def install(level: int, seed: int = 11) -> None:
     """Monkeypatch the customer policy. The evaluator file itself is untouched."""
     original_initial = PRISTINE_INITIAL
     original_reply = PRISTINE_REPLY
-    rng = random.Random(seed)
 
     def initial_message(sample, category, disclosed):
         text = original_initial(sample, category, disclosed)
@@ -164,6 +179,7 @@ def install(level: int, seed: int = 11) -> None:
         intent, parsed_category, constraints = parse_opening(text)
         if parsed_category is None or intent not in OPENINGS:
             return text
+        rng = _message_rng(seed, level, text)
         payload = perturb("; ".join(constraints), level, rng) if constraints else ""
         if level in DEGRADES_CATEGORY:
             parsed_category = degrade_category(parsed_category, rng)
@@ -174,6 +190,7 @@ def install(level: int, seed: int = 11) -> None:
         if level == 0:
             return text, boundary
         is_override, constraints = parse_reply(text)
+        rng = _message_rng(seed, level, text)
         if not constraints:
             return rng.choice(NO_SIGNAL), boundary
         payload = perturb("; ".join(constraints), level, rng)
