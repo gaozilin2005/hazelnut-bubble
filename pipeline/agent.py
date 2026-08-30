@@ -381,6 +381,7 @@ class PipelineAgent:
         erase_on_override: bool = False, exposure_gate: bool = True,
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
         distill: bool = False, no_repeat: bool = False,
+        neg_aspects: float = 0.0,
     ) -> None:
         # Pillar III adaptive orchestration (--no-repeat): failure detection +
         # strategy switch. If the session reached turn N, the evaluator did not
@@ -389,6 +390,13 @@ class PipelineAgent:
         # the conversational-recommender literature warns about. Off by
         # default; measured, see README.
         self.no_repeat = no_repeat
+        self.neg_aspects = neg_aspects
+        # Rejection memory feeds BOTH mechanisms -- item-level demotion and
+        # aspect-level penalties -- so it is recorded (and override-cleared)
+        # whenever either is active. Gating it on no_repeat alone meant
+        # --neg-aspects ran with an always-empty memory and measured as "no
+        # effect" for the wrong reason.
+        self._tracks_rejections = bool(no_repeat or neg_aspects)
         self._shown: dict[str, set[str]] = {}
         # exposure_gate is the on/off switch (--no-exposure-gate reproduces the
         # honest, ungated ranking score); exposure/release_turn tune it when on.
@@ -396,6 +404,7 @@ class PipelineAgent:
         self.retriever = HybridRetriever(
             use_prior=use_prior, use_dense=use_dense, distill=distill
         )
+        self.retriever.neg_weight = neg_aspects
         self.retriever.build(str(catalog_path))
         self.rerank_pool = rerank_pool
         self._reported_prompt = 0
@@ -493,7 +502,7 @@ class PipelineAgent:
         route(state, user_message, turn)
         if self.erase_on_override and state.override_turn == turn:
             erase_superseded(state)
-        if self.no_repeat and (turn in OVERRIDE_WINDOW or state.override_turn == turn):
+        if self._tracks_rejections and (turn in OVERRIDE_WINDOW or state.override_turn == turn):
             # CORRECTNESS, not tuning: evaluator/local_evaluator.py:252 ignores
             # a hit until `override_applied`, so in an intent-override session
             # anything shown before the override turn was never actually tested
@@ -509,6 +518,13 @@ class PipelineAgent:
             # turn from {3, 4}, so clearing unconditionally across that window
             # closes it without depending on any parse succeeding.
             self._shown.pop(session_id, None)
+        if self.neg_aspects:
+            # Same rejection memory the no-repeat guard maintains, including its
+            # override-window clearing: items shown before an override fired were
+            # never tested, so they are not evidence about anything.
+            self.retriever.set_rejected(
+                sorted(self._shown.get(session_id, ())), " ".join(state.constraints)
+            )
         candidates = self.retriever.retrieve(state, CANDIDATE_POOL)
         ranked = self.reranker.rerank(state, candidates[:max(self.rerank_pool, top_k)])
         # Proactive guidance: what are the surviving candidates most divided on?
@@ -529,7 +545,7 @@ class PipelineAgent:
             ranked = self._drop_seen(session_id, ranked)
 
         exposed = [asin for asin, _ in ranked[:self._exposure(state, ranked, top_k)]]
-        if self.no_repeat:
+        if self._tracks_rejections:
             self._shown.setdefault(session_id, set()).update(exposed)
 
         return {

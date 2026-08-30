@@ -25,14 +25,14 @@ def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool 
                reranker: str = "local", ranking_model: str | None = None,
                exposure_gate: bool = True, dialog: str = "integrated",
                erase_on_override: bool = False, distill: bool = False,
-               no_repeat: bool = False):
+               no_repeat: bool = False, neg_aspects: float = 0.0):
     if name == "pipeline":
         from pipeline.agent import PipelineAgent
         return PipelineAgent(catalog, use_prior=use_prior, use_dense=use_dense,
                              reranker=reranker, ranking_model=ranking_model,
                              exposure_gate=exposure_gate, dialog=dialog,
                              erase_on_override=erase_on_override, distill=distill,
-                             no_repeat=no_repeat)
+                             no_repeat=no_repeat, neg_aspects=neg_aspects)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -78,6 +78,9 @@ def main() -> None:
                                  "brain-simulator", "brain-fixed", "dynamic"),
                         help="question policy: wildcard is the placeholder baseline; "
                              "brain-* use pipeline/dialog.py (B)")
+    parser.add_argument("--neg-aspects", type=float, default=0.0,
+                        help="aspect-level negative feedback weight (Bi et al. "
+                             "CIKM 2019); 0 disables. Implies rejection tracking")
     parser.add_argument("--no-repeat", action="store_true",
                         help="Pillar III adaptive orchestration: demote candidates "
                              "already shown and rejected in this session; off by "
@@ -111,7 +114,8 @@ def main() -> None:
                        ranking_model=args.ranking_model,
                        exposure_gate=not args.no_exposure_gate,
                        dialog=args.dialog, erase_on_override=args.erase_on_override,
-                       distill=args.distill, no_repeat=args.no_repeat)
+                       distill=args.distill, no_repeat=args.no_repeat,
+                       neg_aspects=args.neg_aspects)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()

@@ -220,31 +220,39 @@ The brief asks for two things under Pillar III — *Runtime Adaptation* ("Person
 
 **Adaptive orchestration (`--no-repeat`).** Failure detection plus strategy switch. If a session reached turn N, the evaluator found no target in turns 1..N−1, so those items are confirmed negatives; re-showing them is the closed feedback loop the [conversational-recommender survey](https://www.sciencedirect.com/science/article/pii/S2666651021000164) describes ("when a user rejects a recommendation, the system stays at the same vertex"). Rejected candidates are demoted — *demoted, not filtered*, so an all-seen list still returns ten results rather than going empty.
 
+**Aspect-level negative feedback (`--neg-aspects W`).** The same rejection signal, used for far more. Bi et al., ["Conversational Product Search Based on Negative Feedback"](https://arxiv.org/abs/1909.02071) (CIKM 2019), report that decomposing a rejection into fine-grained **aspect-value pairs** significantly beats *item-level* negative feedback — and `--no-repeat` is exactly that item-level baseline. A rejected black nylon jacket is evidence against *black* and against *nylon*, not merely against that one listing. Each rejected item is decomposed over `FACET_VOCABULARY`, and candidates sharing those values are penalised in proportion to how many rejections exhibited them. Values the customer explicitly disclosed are never penalised: they asked for it, so its presence among rejects says nothing.
+
+Classical Rocchio weights negative evidence far below positive (γ≈0.2 against β≈0.8) because human relevance judgements are noisy. Ours are not — reaching turn N *proves* the evaluator found no target earlier — so the weight was swept rather than inherited, and the response is flat from W=1 to W=8.
+
 ### Measured
 
-| | public | held-1000 | held-200 |
-|---|---|---|---|
-| neither (default) | **0.9538** | 0.8545 | 0.8452 |
-| `--distill` | 0.9534 | 0.8529 | 0.8464 |
-| `--no-repeat` | 0.9540 | **0.8574** | **0.8472** |
-| both | 0.9573\* | 0.8585\* | — |
+Each flag alone against the shared baseline, on four draws — the public set, the 1,000-session broad held-out, and two *independently seeded* 200-session held-out draws:
 
-\*measured before the correctness fix below; see it for why those numbers are not the ones to use.
+| | public | held-1000 | held-200 (s.20260829) | held-200 (s.7) |
+|---|---|---|---|---|
+| baseline (shipped default) | **0.9538** | 0.8545 | 0.8452 | 0.8404 |
+| `--distill` | 0.9534 | 0.8529 | 0.8464 | — |
+| `--no-repeat` | 0.9540 | 0.8574 | 0.8472 | 0.8412 |
+| `--neg-aspects 1.0` | 0.9538 | 0.8711 | 0.8568 | 0.8544 |
+| **`--no-repeat --neg-aspects 1.0`** | 0.9538 | **0.8737** | — | **0.8585** |
 
-**Distillation is a clean null** — −0.0004 / −0.0016 / +0.0012, mixed signs, all noise. Worth more than a single-draw result precisely because three independent draws agree there is no effect.
+**Distillation is a clean null** — −0.0004 / −0.0016 / +0.0012, mixed signs. Worth more than a single-draw result precisely because three independent draws agree there is no effect.
 
-**Orchestration is a small, consistent positive** — +0.0002 / +0.0029 / +0.0020, never negative on any dataset, and exactly baseline at every paraphrase level L0–L4. Session-level diff on the 1,000-session set: 63 sessions improved rank, **0 worsened**, Hit@10 unchanged. Hit@10 cannot change by construction: `ranked` is `candidates[:max(rerank_pool, top_k)]`, i.e. the top ten only, so demotion reorders within what was already going to be shown and can never pull in rank 11+. This is a ranking-quality improvement, not extra catalog coverage.
+**Item-level orchestration is a small, safe positive** — +0.0002 / +0.0029 / +0.0020, never negative, exactly baseline at every paraphrase level. Its ceiling is structural: `ranked` is `candidates[:max(rerank_pool, top_k)]`, the top ten only, so demotion reorders what was already going to be shown and can never reach rank 11+.
 
-### A correctness bug worth recording
+**Aspect-level negative feedback is the substantial one, and it replicates.** +0.0166 / +0.0116 / +0.0140 across three held-out draws, two of them independently seeded and never tuned against. Roughly 5× item-level demotion, exactly the direction Bi et al. predict. Unlike everything else measured in this repository, the gain is **Hit@10, not reordering**:
 
-The first version of `--no-repeat` scored considerably better on the public set (+0.0039) and we nearly reported that. It was partly a bug. `evaluator/local_evaluator.py:252` ignores a hit until `override_applied`, so in an intent-override session anything shown before the override turn was **never tested** against the target and is not a confirmed negative. The guard that cleared memory on override depended on *parsing* the override message — and paraphrasing breaks that parse. Per-scenario measurement found the whole paraphrase regression sitting in one place:
+| W | Hit@10 | MRR | MTTC | Score |
+|---|---|---|---|---|
+| 0.0 | 0.9620 | 0.6741 | 2.43 | 0.8545 |
+| 1.0 | **0.9830** | 0.6837 | **2.27** | 0.8711 |
+| 8.0 | 0.9800 | 0.6944 | 2.33 | 0.8718 |
 
-| scenario | L1 MRR | L4 MRR |
-|---|---|---|
-| browsing / buying / boundary | all improved | all improved |
-| **intent_override** | **0.695 → 0.287** | **0.631 → 0.216** |
+**+21 targets found per 1,000 sessions**, with MRR up *and* MTTC faster — all three metrics moving the right way at once, which nothing else here has managed. It also **improves paraphrase robustness at every level** (L1 +0.0114, L2 +0.0143, L3 +0.0060, L4 +0.0064, L0 exactly neutral), and the two mechanisms compose: together +0.0192 / +0.0181.
 
-`behavior_for` draws the override turn from `{3, 4}`, so the fix discards rejection memory across that window unconditionally, independent of any parse succeeding. That restored override MRR exactly to baseline at every level — and roughly halved the apparent gain, which is the honest size of the effect.
+The public set is unmoved because it is saturated — Hit@10 is already 1.000 ungated, so there are no missed targets left to find there. That divergence is the point: the held-out draws are the ones that resemble the private 800.
+
+Both flags nevertheless ship **OFF**, pending a team decision on flipping the default. W=1.0 is a round value in the middle of a flat plateau rather than the argmax; W=2.0 measured marginally better on all three draws (+0.001–0.003), which is inside the plateau and not worth tuning to.
 
 ## Held-Out Generalization Check
 
