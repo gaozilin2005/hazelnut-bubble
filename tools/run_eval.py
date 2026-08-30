@@ -25,7 +25,7 @@ def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool 
                reranker: str = "local", ranking_model: str | None = None,
                exposure_gate: bool = True, dialog: str = "integrated",
                erase_on_override: bool = False, distill: bool = False,
-               no_repeat: bool = False, neg_aspects: float = 0.0,
+               no_repeat: bool = True, neg_aspects: float = 1.0,
                tie_break_dense: bool = False):
     if name == "pipeline":
         from pipeline.agent import PipelineAgent
@@ -80,13 +80,13 @@ def main() -> None:
                                  "brain-simulator", "brain-fixed", "dynamic"),
                         help="question policy: wildcard is the placeholder baseline; "
                              "brain-* use pipeline/dialog.py (B)")
-    parser.add_argument("--neg-aspects", type=float, default=0.0,
+    parser.add_argument("--neg-aspects", type=float, default=1.0,
                         help="aspect-level negative feedback weight (Bi et al. "
-                             "CIKM 2019); 0 disables. Implies rejection tracking")
-    parser.add_argument("--no-repeat", action="store_true",
-                        help="Pillar III adaptive orchestration: demote candidates "
-                             "already shown and rejected in this session; off by "
-                             "default, see README")
+                             "CIKM 2019). ON by default at 1.0; pass 0 to ablate")
+    parser.add_argument("--allow-repeats", action="store_true",
+                        help="ablation: stop demoting candidates already shown and "
+                             "rejected this session. Repeat suppression is ON by "
+                             "default; this restores the pre-Pillar-III behaviour")
     parser.add_argument("--distill", action="store_true",
                         help="Pillar III context distillation: merge redundant "
                              "constraints and reweight by live-pool discriminance "
@@ -125,7 +125,7 @@ def main() -> None:
                        ranking_model=args.ranking_model,
                        exposure_gate=not args.no_exposure_gate,
                        dialog=args.dialog, erase_on_override=args.erase_on_override,
-                       distill=args.distill, no_repeat=args.no_repeat,
+                       distill=args.distill, no_repeat=not args.allow_repeats,
                        neg_aspects=args.neg_aspects,
                        tie_break_dense=args.tie_break_dense)
     built = time.perf_counter()
@@ -143,7 +143,7 @@ def main() -> None:
             "dialog": args.dialog if args.agent == "pipeline" else None,
             "erase_on_override": args.erase_on_override,
             "distill": args.distill,
-            "no_repeat": args.no_repeat,
+            "no_repeat": not args.allow_repeats,
             "neg_aspects": args.neg_aspects,
             "tie_break_dense": args.tie_break_dense,
             "exposure_gate": not args.no_exposure_gate,
@@ -165,8 +165,8 @@ def main() -> None:
     suffix = f"_{args.dialog}" if args.agent == "pipeline" and args.dialog != "integrated" else ""
     suffix += "_erase" if args.erase_on_override else ""
     suffix += "_distill" if args.distill else ""
-    suffix += "_norepeat" if args.no_repeat else ""
-    suffix += f"_neg{args.neg_aspects:g}" if args.neg_aspects else ""
+    suffix += "_allowrepeats" if args.allow_repeats else ""
+    suffix += f"_neg{args.neg_aspects:g}" if args.neg_aspects != 1.0 else ""
     suffix += "_tiebreak" if args.tie_break_dense else ""
     # Any flag that changes the score must change the filename, or one run
     # silently overwrites another. This one was missed once already.
