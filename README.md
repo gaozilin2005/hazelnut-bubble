@@ -86,60 +86,74 @@ Whether an intent-override should *erase* the customer's earlier stated preferen
 
 ## Setup and Installation
 
-**Every command in this document is run from the repository root** — all paths are relative
-to it.
+Four steps, about two minutes plus a 19 MB download. **Run everything from the repository
+root** — every path in this document is relative to it.
+
+Requirements: Python 3.10+ and `numpy`. Everything else is standard library. No API keys, no
+environment variables, no network at scoring time, no GPU.
+
+### 1. Install the dependency
 
 ```bash
 cd /path/to/hazelnut-bubble
-ls   # you should see: pipeline/  tools/  data/  evaluator/  starter/
-```
-
-Requires Python 3.10+ (no non-default version requirement) and `numpy`; everything else is
-standard library. No environment variables are needed for the default configuration.
-
-```bash
 pip install -r requirements.txt
 ```
 
-**Submission entry point:** `agent.py` in the repository root exports `Agent`, as
-`docs/submission_rules.md` requires. It subclasses `PipelineAgent` with the exact defaults
-every reported score uses — integrated dialog policy, local reranker, exposure gate and
-single-item walk on, all experimental flags off. Verified to score `0.969342` when driven
-through the organizer's own `evaluate()`:
+### 2. Download the official catalog
 
-```python
-from agent import Agent
-a = Agent("data/catalog.jsonl")
-a.reset("s1", user_profile)
-a.respond("s1", "I'm looking for Women Dresses. A key requirement is: cotton.", 1, 10)
-```
-
-One command to run it in the official harness:
+The catalog is 58 MB and is **not** in git. It ships as a release on the **organizer's** repo,
+not on this fork — a distinction that has cost this project time twice.
 
 ```bash
-python3 tools/run_eval.py --agent pipeline --dataset data/public_set.jsonl
-```
-
-Download the official frozen catalog from the organizer's participant-kit release and verify it:
-
-Note the release is on the **organizer's** repo, not this fork.
-
-```bash
-cd /path/to/hazelnut-bubble        # all paths below are relative to the repo root
-
 BASE=https://github.com/TechJam2026/techjam-conversational-search/releases/download/participant-kit
 curl -sSL -o data/catalog.jsonl.gz "$BASE/catalog.jsonl.gz"
 curl -sSL -o data/SHA256SUMS       "$BASE/SHA256SUMS"
+```
 
-# SHA256SUMS lists bare filenames, so `shasum -c` must run from the directory holding them.
+### 3. Verify and unpack it
+
+Do not skip the checksum: every number in this document assumes that exact file.
+
+```bash
+# SHA256SUMS lists bare filenames, so the check must run from the directory holding them.
 # The parentheses make that a subshell, so your own shell stays at the repo root.
 (cd data && shasum -a 256 -c <(grep catalog.jsonl.gz SHA256SUMS))   # -> catalog.jsonl.gz: OK
 
-gzip -dk data/catalog.jsonl.gz     # -k keeps the .gz so you can re-verify without re-downloading
-wc -l data/catalog.jsonl           # expect 50000
+gzip -dk data/catalog.jsonl.gz     # -k keeps the .gz, so you can re-verify without re-downloading
+wc -l data/catalog.jsonl           # -> 50000
 ```
 
-Do not skip the checksum — every number in this document assumes that exact file.
+On Linux, substitute `sha256sum -c` for `shasum -a 256 -c`. Both lines need bash or zsh for
+the `<(...)` process substitution; under plain `sh`, use
+`(cd data && grep catalog.jsonl.gz SHA256SUMS | shasum -a 256 -c -)`.
+
+### 4. Confirm the install
+
+Two commands, roughly a minute each (about 60 s of that is the one-off index build). Both
+scores are exact — if either differs, something in the setup is wrong, and the baseline is the
+more diagnostic of the two because it certifies the harness independently of our code.
+
+```bash
+python3 tools/run_eval.py --agent baseline    # -> 0.10671   (organizer's BM25 reference)
+python3 tools/run_eval.py --agent pipeline    # -> 0.969342  (this system)
+```
+
+### Using the agent directly
+
+`agent.py` in the repository root exports `Agent`, as `docs/submission_rules.md` requires. It
+subclasses `PipelineAgent` with the exact defaults every reported score uses — integrated
+dialog policy, local reranker, exposure gate and single-item walk on, all experimental flags
+off — so the organizer's harness and our tooling reach the code by the same path and the
+submitted defaults cannot drift from the tested ones.
+
+```python
+from agent import Agent
+
+a = Agent("data/catalog.jsonl")          # ~60 s: builds the index once, then reuse it
+a.reset("s1", user_profile)              # once per session
+a.respond("s1", "I'm looking for Women Dresses. A key requirement is: cotton.", 1, 10)
+# -> {"message": ..., "ask_attribute": "other", "recommendations": [...], "usage": {...}}
+```
 
 ## Reproducing Our Results
 
