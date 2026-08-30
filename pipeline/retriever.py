@@ -78,6 +78,33 @@ DENSE_CANDIDATES = {
 # Browsing is diversity-first: cap any one brand so the shortlist spans the
 # category instead of ten variants of one product.
 MAX_PER_STORE_BROWSING = 3
+# Opt-in (--tie-break-dense), off by default -- MEASURED AND NOT RECOMMENDED,
+# kept for the record. Motivated by a real diagnosis: 29 of 38 misses on the
+# 1,000-session held-out set are not a ranking error but an information
+# deficiency -- the target sits a few ranks below the cutoff in a wide, FLAT
+# stalemate (e.g. scores 5.409-5.428 across 12 near-identical "women's leather
+# riding boot" listings, gap to the cutoff as small as 0.001), because every
+# disclosed constraint is a generic attribute nearly the whole bucket shares.
+# The mechanism is narrower than the RRF fusion already measured harmful
+# (README) -- dense only ever reorders the band of candidates already within
+# TIE_BREAK_MARGIN of the cutoff, never displacing a #1 with a clear lead --
+# but it does not hold up under cross-validation:
+#
+#   dataset                              margin=0   margin=0.01  margin=0.05
+#   held-out, 1,000 broad (unmatched)     0.8545     0.8606       0.8606
+#   held-out, 200 (popularity-matched)    0.8452     0.8433       0.8466
+#   public 200, gated (the tuning set)    0.9538     0.9398       0.9331
+#
+# The apparent +0.0061 gain on the 1,000-session draw does not replicate on an
+# independently-sampled 200-session draw (-0.0019 to +0.0014, noise-level),
+# while the public-200 cost is consistent and *worsens* with margin. This is
+# the same single-draw-does-not-replicate trap documented for the exposure-
+# schedule sweep in README -- reported as a negative result, not shipped as a
+# judgement call, because the "positive" signal itself did not survive a
+# second independent sample. Inert under paraphrase (L1-L4 unchanged): the
+# guard skips tie-breaking whenever constraints fail to parse, matching the
+# exposure gate's own cold-start guard.
+TIE_BREAK_MARGIN = 0.01
 # Reverse containment: a product's own attribute string found inside the user's
 # text. Recovers the verbatim-quote signal no matter how the message is worded.
 SNIPPET_BONUS = 2.5
@@ -108,6 +135,7 @@ class HybridRetriever:
 
     def __init__(
         self, use_prior: bool = True, use_dense: bool = True,
+        tie_break_dense: bool = False, tie_break_margin: float = TIE_BREAK_MARGIN,
         distill: bool = False,
     ) -> None:
         # Pillar III context distillation (--distill): merge redundant
@@ -121,6 +149,8 @@ class HybridRetriever:
         self.neg_weight: float = 0.0
         self._neg: dict[str, float] = {}
         self.use_dense = use_dense
+        self.tie_break_dense = tie_break_dense
+        self.tie_break_margin = tie_break_margin
         self.dense = DenseIndex()
         self.stores: list[str] = []
         # The popularity prior is a legitimate tie-breaker, but on a dev catalog
@@ -423,8 +453,48 @@ class HybridRetriever:
                 best = (balance, attribute, present[:2])
         return (best[1], best[2]) if best else None
 
-    def retrieve(self, state: SharedSessionState, k: int) -> list[str]:
+    def _break_ties(
+        self, ordered: list[int], state: SharedSessionState, blob: str, k: int
+    ) -> list[int]:
+        """Reorder ONLY the band of candidates within tie_break_margin of the
+        rank-k cutoff, by dense similarity. Everything outside the band --
+        including a clear #1 with no real competition -- keeps its lexical
+        position untouched.
+        """
+        if len(ordered) <= k or not state.constraints:
+            return ordered
+        scores = [self.score(index, state, blob) for index in ordered]
+        cutoff = scores[k - 1]
+        tolerance = self.tie_break_margin * max(abs(cutoff), 1e-6)
+
+        lo = k - 1
+        while lo > 0 and (scores[lo - 1] - cutoff) <= tolerance:
+            lo -= 1
+        hi = k - 1
+        while hi + 1 < len(ordered) and (cutoff - scores[hi + 1]) <= tolerance:
+            hi += 1
+        if lo == hi:
+            return ordered
+
+        band = ordered[lo : hi + 1]
+        similarity = self.dense.similarity(self._query_text(state), np.asarray(band))
+        band_ranked = [band[i] for i in np.argsort(-similarity)]
+        return ordered[:lo] + band_ranked + ordered[hi + 1 :]
+
+    def retrieve(
+        self, state: SharedSessionState, k: int, cutoff: int | None = None
+    ) -> list[str]:
         """Route -> gather candidates -> rank.
+
+        `k` is how many candidates to return -- callers ask for more than the
+        scored top-10 so a reranker downstream has room to reorder. `cutoff`
+        is where tie-breaking should anchor: the position that actually gets
+        scored (agent.py passes the evaluator's real top_k here). They are NOT
+        the same number in production -- agent.py calls retrieve(state, 200)
+        for reranker headroom while cutoff stays 10. Reusing `k` as the
+        tie-break anchor was a real bug caught before any live measurement:
+        the tie-break band formed around position 200, not 10, and did
+        nothing useful.
 
         Filter track (buying/override): the exact category bucket, precision-first.
         Dense track: engaged when the filter track yields nothing -- a reworded or
@@ -466,6 +536,8 @@ class HybridRetriever:
             ordered = sorted(
                 candidates, key=lambda index: (-self.score(index, state, blob), index)
             )
+            if self.use_dense and self.tie_break_dense:
+                ordered = self._break_ties(ordered, state, blob, cutoff or k)
         if state.intent == INTENT_BROWSING:
             ordered = self._diversify(ordered, max(k, 1))
         return [self.asins[index] for index in ordered[:k]]

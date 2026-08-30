@@ -16,7 +16,14 @@ from pathlib import Path
 
 from pipeline.dialog import ConversationBrain, compose_message
 from pipeline.interfaces import INTENT_OVERRIDE, SharedSessionState
-from pipeline.reranker import IdentityReranker, LLMReranker, LocalReranker
+from pipeline.reranker import (
+    IdentityReranker,
+    LLMReranker,
+    LocalReranker,
+    PairwiseLLMReranker,
+    PairwiseTop3LLMReranker,
+    TargetedLLMReranker,
+)
 from pipeline.retriever import HybridRetriever
 from pipeline.router import erase_superseded, route
 
@@ -381,7 +388,7 @@ class PipelineAgent:
         erase_on_override: bool = False, exposure_gate: bool = True,
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
         distill: bool = False, no_repeat: bool = False,
-        neg_aspects: float = 0.0,
+        neg_aspects: float = 0.0, tie_break_dense: bool = False,
     ) -> None:
         # Pillar III adaptive orchestration (--no-repeat): failure detection +
         # strategy switch. If the session reached turn N, the evaluator did not
@@ -402,7 +409,8 @@ class PipelineAgent:
         # honest, ungated ranking score); exposure/release_turn tune it when on.
         self.exposure_gate = exposure_gate
         self.retriever = HybridRetriever(
-            use_prior=use_prior, use_dense=use_dense, distill=distill
+            use_prior=use_prior, use_dense=use_dense,
+            tie_break_dense=tie_break_dense, distill=distill,
         )
         self.retriever.neg_weight = neg_aspects
         self.retriever.build(str(catalog_path))
@@ -412,6 +420,18 @@ class PipelineAgent:
         self._position = {asin: i for i, asin in enumerate(self.retriever.asins)}
         if reranker == "llm":
             self.reranker = LLMReranker(
+                self.retriever, model=ranking_model or "claude-opus-5"
+            )
+        elif reranker == "targeted_llm":
+            self.reranker = TargetedLLMReranker(
+                self.retriever, model=ranking_model or "claude-opus-5"
+            )
+        elif reranker == "pairwise_llm":
+            self.reranker = PairwiseLLMReranker(
+                self.retriever, model=ranking_model or "claude-opus-5"
+            )
+        elif reranker == "pairwise_top3_llm":
+            self.reranker = PairwiseTop3LLMReranker(
                 self.retriever, model=ranking_model or "claude-opus-5"
             )
         elif reranker == "identity":
@@ -525,7 +545,7 @@ class PipelineAgent:
             self.retriever.set_rejected(
                 sorted(self._shown.get(session_id, ())), " ".join(state.constraints)
             )
-        candidates = self.retriever.retrieve(state, CANDIDATE_POOL)
+        candidates = self.retriever.retrieve(state, CANDIDATE_POOL, cutoff=top_k)
         ranked = self.reranker.rerank(state, candidates[:max(self.rerank_pool, top_k)])
         # Proactive guidance: what are the surviving candidates most divided on?
         facet = (
