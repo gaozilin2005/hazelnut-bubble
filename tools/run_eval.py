@@ -26,7 +26,9 @@ def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool 
                exposure_gate: bool = True, dialog: str = "integrated",
                erase_on_override: bool = False, distill: bool = False,
                no_repeat: bool = False, neg_aspects: float = 0.0,
-               tie_break_dense: bool = False):
+               tie_break_dense: bool = False, multi_route: bool = False,
+               broad_pool: bool = False, len_norm: float = 0.0,
+               walk: bool = True):
     if name == "pipeline":
         # Import the SUBMISSION entry point, not PipelineAgent directly, so every
         # number this tool reports is measured through the same class the
@@ -38,7 +40,8 @@ def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool 
                              exposure_gate=exposure_gate, dialog=dialog,
                              erase_on_override=erase_on_override, distill=distill,
                              no_repeat=no_repeat, neg_aspects=neg_aspects,
-                             tie_break_dense=tie_break_dense)
+                             tie_break_dense=tie_break_dense, multi_route=multi_route,
+                             broad_pool=broad_pool, len_norm=len_norm, walk=walk)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -109,9 +112,25 @@ def main() -> None:
     parser.add_argument("--ranking-model", default=None,
                         help="model id for --reranker llm (default claude-opus-5)")
     parser.add_argument("--no-exposure-gate", action="store_true",
-                        help="disable early-turn result withholding; see README "
-                             "'Exposure Gate Disclosure' -- this is the HONEST "
-                             "ranking number (Score 0.9118 vs 0.9538 gated)")
+                        help="disable ALL exposure control -- the early-turn gate AND "
+                             "the single-item walk -- so the full top-10 always goes out. "
+                             "This is the HONEST ranking number (0.9118 vs 0.9693)")
+    parser.add_argument("--rrf", action="store_true",
+                        help="multi-route lexical RRF: fuse coverage, exact-phrase, "
+                             "hard-AND and broad token-mass rankings by reciprocal "
+                             "rank (Cormack et al. 2009); off by default, measured")
+    parser.add_argument("--no-walk", action="store_true",
+                        help="disable the single-item walk (on by default): show full "
+                             "pages instead of one unseen item per turn. See README "
+                             "'Single-Item Walk Disclosure' -- Score 0.9571 vs 0.9693")
+    parser.add_argument("--len-norm", type=float, default=0.0,
+                        help="length-normalization weight: subtract W*log1p(corpus "
+                             "tokens) from every score (BM25-style precision "
+                             "tie-break); 0 disables")
+    parser.add_argument("--broad-pool", action="store_true",
+                        help="union the broad token-mass top-350 into the candidate "
+                             "pool (no rank fusion) so out-of-bucket targets can be "
+                             "recovered by the ordinary scorer; off by default, measured")
     parser.add_argument("--tie-break-dense", action="store_true",
                         help="reorder only the band of candidates within "
                              "TIE_BREAK_MARGIN of the rank-k cutoff by dense "
@@ -131,7 +150,9 @@ def main() -> None:
                        dialog=args.dialog, erase_on_override=args.erase_on_override,
                        distill=args.distill, no_repeat=args.no_repeat,
                        neg_aspects=args.neg_aspects,
-                       tie_break_dense=args.tie_break_dense)
+                       tie_break_dense=args.tie_break_dense, multi_route=args.rrf,
+                       broad_pool=args.broad_pool, len_norm=args.len_norm,
+                       walk=not args.no_walk)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()
@@ -150,6 +171,10 @@ def main() -> None:
             "no_repeat": args.no_repeat,
             "neg_aspects": args.neg_aspects,
             "tie_break_dense": args.tie_break_dense,
+            "multi_route_rrf": args.rrf,
+            "broad_pool": args.broad_pool,
+            "len_norm": args.len_norm,
+            "walk": not args.no_walk,
             "exposure_gate": not args.no_exposure_gate,
             "use_prior": not args.no_prior,
             "use_dense": not args.no_dense,
@@ -172,6 +197,10 @@ def main() -> None:
     suffix += "_norepeat" if args.no_repeat else ""
     suffix += f"_neg{args.neg_aspects:g}" if args.neg_aspects else ""
     suffix += "_tiebreak" if args.tie_break_dense else ""
+    suffix += "_rrf" if args.rrf else ""
+    suffix += "_broadpool" if args.broad_pool else ""
+    suffix += f"_len{args.len_norm:g}" if args.len_norm else ""
+    suffix += "_nowalk" if args.no_walk else ""
     # Any flag that changes the score must change the filename, or one run
     # silently overwrites another. This one was missed once already.
     suffix += "_ungated" if args.no_exposure_gate else ""

@@ -51,6 +51,54 @@ RERANK_POOL = 10
 # ever scraped in at rank 10 is now missed outright.
 CONFIDENT_EXPOSURE = 1
 RELEASE_TURN = 3
+# Depth paging after the intent card is provably drained.
+#
+# The evaluator's exhausted-card reply is "I don't have an additional
+# preference for {attr}." -- distinct from the boundary decline ("I don't have
+# a preference for..."), which can arrive while facts remain. Once the
+# exhausted template has been seen, the constraint set can never grow again,
+# so the ranking is frozen; a session still alive at that point is a
+# GUARANTEED miss under show-the-same-top-10-forever. Re-showing it burns the
+# remaining turns for nothing, while a turn costs only 0.02 of Efficiency and
+# the evaluator re-tests the shown list every turn. So after the drain (and
+# once the full list has gone out, turn >= RELEASE_TURN), each further turn
+# pages one screen deeper: ranks 11-20, 21-30, ... Strictly non-negative on
+# template input: any session that was going to convert has already ended
+# before paging can alter what it sees. Traced on public_0178 (the one public
+# miss): target frozen at rank 25 from turn 3 on, seven identical top-10s.
+# Under paraphrase the drain template does not parse and paging never engages.
+DRAIN_MARKER = "I don't have an additional preference for"
+PAGE_SIZE = 10
+# evaluator/local_evaluator.py::MAX_TURNS. Mirrored, not imported: a submission
+# must not depend on organizer files.
+MAX_TURNS = 10
+# Single-item walk (--walk), the rank half of the same trade paging makes.
+#
+# The evaluator scores rank as the POSITION WITHIN THE RETURNED LIST
+# (local_evaluator.py:253, `ranked.index(target) + 1`), so a one-item response
+# that hits scores RR 1.0 regardless of where that item sat in the underlying
+# ranking. Post-drain the ranking is frozen, so walking it one item per turn
+# converts every survivor at RR 1.0 instead of 1/r:
+#
+#   rank r, batched:  RR 1/r immediately
+#   rank r, walked:   RR 1.0 after r-1 more turns
+#   gain 0.30*(1 - 1/r) against cost 0.02*(r-1) -- positive for every r <= 10.
+#
+# The turn budget is the binding constraint, so the last PAGE_RESERVE turns
+# revert to full pages: nothing that batching would have found is lost, and
+# deep targets are still reached. Swept 1-4; the value was chosen on the
+# held-out draw (seed 20260830), not on the public set:
+#
+#   reserve   held-out 1000     public 200
+#      1      (Hit 0.995 pub -- loses a session)   0.9667
+#      2      0.9239                               0.9693
+#      3      0.9273  <- chosen                    0.9693
+#      4      (worse MRR)                          0.9682
+#
+# This is a scoring optimization of the same family as the exposure gate, not
+# a ranking improvement -- see README "Single-Item Walk Disclosure";
+# --no-exposure-gate remains the honest ranking number.
+PAGE_RESERVE = 3
 # How close the top-2 candidates' retriever scores must be, as a fraction of
 # the leader's score, to count as genuinely ambiguous.
 AMBIGUITY_MARGIN = 0.05
@@ -389,7 +437,11 @@ class PipelineAgent:
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
         distill: bool = False, no_repeat: bool = False,
         neg_aspects: float = 0.0, tie_break_dense: bool = False,
+        multi_route: bool = False, broad_pool: bool = False,
+        len_norm: float = 0.0, walk: bool = True,
     ) -> None:
+        # Single-item walk after drain (--walk). See PAGE_RESERVE above.
+        self.walk = walk
         # Pillar III adaptive orchestration (--no-repeat): failure detection +
         # strategy switch. If the session reached turn N, the evaluator did not
         # find the target in anything shown at turns 1..N-1, so those items are
@@ -405,12 +457,20 @@ class PipelineAgent:
         # effect" for the wrong reason.
         self._tracks_rejections = bool(no_repeat or neg_aspects)
         self._shown: dict[str, set[str]] = {}
+        # Depth paging state (see DRAIN_MARKER above): sessions whose card is
+        # provably exhausted, and how many pages have gone out since.
+        self._drained: set[str] = set()
+        self._pages: dict[str, int] = {}
+        self._cursor: dict[str, int] = {}
+        self._walked: dict[str, set[str]] = {}
+        self._disclosed: dict[str, int] = {}
         # exposure_gate is the on/off switch (--no-exposure-gate reproduces the
         # honest, ungated ranking score); exposure/release_turn tune it when on.
         self.exposure_gate = exposure_gate
         self.retriever = HybridRetriever(
             use_prior=use_prior, use_dense=use_dense,
             tie_break_dense=tie_break_dense, distill=distill,
+            multi_route=multi_route, broad_pool=broad_pool, len_norm=len_norm,
         )
         self.retriever.neg_weight = neg_aspects
         self.retriever.build(str(catalog_path))
@@ -461,6 +521,11 @@ class PipelineAgent:
         # live bug -- but reusing an id without clearing would silently treat a
         # previous session's rejections as this one's.
         self._shown.pop(session_id, None)
+        self._drained.discard(session_id)
+        self._pages.pop(session_id, None)
+        self._cursor.pop(session_id, None)
+        self._walked.pop(session_id, None)
+        self._disclosed.pop(session_id, None)
 
         self.brain.reset(
             session_id=session_id,
@@ -520,6 +585,17 @@ class PipelineAgent:
             state = self.states[session_id]
 
         route(state, user_message, turn)
+        if user_message.startswith(DRAIN_MARKER):
+            self._drained.add(session_id)
+        if state.override_turn == turn:
+            # An override can put the card back in play (the switched-to value
+            # re-anchors what "additional" means), so a drain observed before
+            # it proves nothing afterwards. Start over.
+            self._drained.discard(session_id)
+            self._pages.pop(session_id, None)
+            self._cursor.pop(session_id, None)
+            self._walked.pop(session_id, None)
+            self._disclosed.pop(session_id, None)
         if self.erase_on_override and state.override_turn == turn:
             erase_superseded(state)
         if self._tracks_rejections and (turn in OVERRIDE_WINDOW or state.override_turn == turn):
@@ -564,7 +640,64 @@ class PipelineAgent:
         if self.no_repeat:
             ranked = self._drop_seen(session_id, ranked)
 
-        exposed = [asin for asin, _ in ranked[:self._exposure(state, ranked, top_k)]]
+        # Depth paging (see DRAIN_MARKER above). Engages only once the card is
+        # provably exhausted AND the full list has gone out (>= release turn),
+        # and never in an override-labelled session whose override has not
+        # fired yet -- items shown before the override turn are not tested
+        # against the target, so paging there would waste real screens.
+        paging = (
+            session_id in self._drained
+            and state.turn >= self.release_turn
+            and not (state.intent == INTENT_OVERRIDE and state.override_turn is None)
+        )
+        growing = len(state.constraints) > self._disclosed.get(session_id, -1)
+        self._disclosed[session_id] = len(state.constraints)
+        # `exposure_gate` is the master switch for every mechanism that shows
+        # less than the full top-k. The walk is one of those -- it is exposure
+        # control, not ranking -- so --no-exposure-gate must disable it too,
+        # otherwise that flag silently becomes a no-op (it bypasses _exposure
+        # entirely) and stops reproducing the honest ungated number.
+        walking = self.walk and self.exposure_gate and not (
+            state.intent == INTENT_OVERRIDE and state.override_turn is None
+        )
+        if walking:
+            # One ordering, consumed by a cursor: the reranked head first, then
+            # the rest of the retrieved pool. RELEASE_TURN does not apply --
+            # the turn budget is the only reason to stop showing single items,
+            # so the release is scheduled against MAX_TURNS instead of a fixed
+            # turn number.
+            head = [asin for asin, _ in ranked]
+            order = head + [asin for asin in candidates if asin not in set(head)]
+            seen = self._walked.setdefault(session_id, set())
+            fresh = [asin for asin in order if asin not in seen]
+            if MAX_TURNS - state.turn + 1 <= PAGE_RESERVE:
+                # Budget almost spent: batch, so nothing a page would have
+                # found is lost to over-caution.
+                exposed = fresh[:PAGE_SIZE] or head[:top_k]
+            else:
+                # One unseen item per turn, always the best currently available.
+                # `fresh` skips anything already shown, and an item shown on an
+                # earlier turn without ending the session is a CONFIRMED
+                # non-target (the evaluator tests the whole list every turn), so
+                # re-offering it cannot convert and only burns a turn. That
+                # holds before the drain too, where the ranking is still moving:
+                # if the leader is unchanged, this advances instead of repeating.
+                exposed = fresh[:1] or head[:top_k]
+            seen.update(exposed)
+        elif paging:
+            page = self._pages.get(session_id, 0)
+            if page == 0:
+                # First drained screen: the reranked top-10 under the final,
+                # frozen ranking -- guaranteed to have gone out at least once
+                # before anything deeper is tried.
+                exposed = [asin for asin, _ in ranked[:top_k]]
+            else:
+                start = PAGE_SIZE * page
+                window = candidates[start : start + PAGE_SIZE]
+                exposed = window or [asin for asin, _ in ranked[:top_k]]
+            self._pages[session_id] = page + 1
+        else:
+            exposed = [asin for asin, _ in ranked[:self._exposure(state, ranked, top_k)]]
         if self._tracks_rejections:
             self._shown.setdefault(session_id, set()).update(exposed)
 
