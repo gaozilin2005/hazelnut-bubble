@@ -125,6 +125,13 @@ MIN_SNIPPET_CHARS = 18
 # text incidentally inside a longer document. The prior term is ~0.05-0.12 and
 # saturated ties are separated by ~0.001-0.04, so a weight of ~0.01-0.03
 # decides ties without disturbing real score gaps.
+#
+# MEASURED AND NOT RECOMMENDED. The static probe's promise (+0.002 MRR at
+# w=0.005/0.02 on final-state rankings) did not survive the real turn-by-turn
+# eval: paired on the public 200, w=0.005 is 4 wins / 5 losses (-0.0001) and
+# w=0.02 is 11 / 18 (-0.0011). The sessions it promotes are real, but the
+# near-tied winners it demotes were also converting -- the same both-sides
+# structure that killed every other reweighting of the saturated signal.
 LEN_NORM_DEFAULT = 0.0
 MAX_CATEGORY_TOKENS = 8
 # Buckets are small (median ~5 on a 50k catalog), so when the category is named

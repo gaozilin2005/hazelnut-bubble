@@ -432,14 +432,28 @@ message at increasing paraphrase strength and rescores, without editing the eval
 leans on verbatim phrase containment *and* on the coarse-category bucket filter, and the
 levels degrade them separately:
 
-| level | degrades | public 200 |
-|---|---|---|
-| L0 | nothing — templates verbatim | **0.954** |
-| L1 | prose reworded, payload verbatim | 0.822 |
-| L2 | payload lightly perturbed | 0.790 |
-| L3 | payload rewritten, containment destroyed | 0.668 |
-| L4 | *category* reworded, payload verbatim | 0.698 |
-| L5 | **both** — payload rewritten AND category reworded | **0.390** |
+| level | degrades | pre-hardening | hardened (current) |
+|---|---|---|---|
+| L0 | nothing — templates verbatim | 0.954 | **0.957** |
+| L1 | prose reworded, payload verbatim | 0.832 | 0.831 |
+| L2 | payload lightly perturbed | 0.789 | 0.810 |
+| L3 | payload rewritten, containment destroyed | 0.691 | 0.635 |
+| L4 | *category* reworded, payload verbatim | 0.709 | **0.813** |
+| L5 | **both** — payload rewritten AND category reworded | 0.402 | **0.573** |
+
+Both columns use the paired harness (paraphrases derived per-message from the pristine
+template text, so both agents see identical wording; earlier stream-RNG numbers — L5
+0.390 among them — differ by resampling noise only). The hardened column adds two
+mechanisms to `pipeline/retriever.py`, both gated behind template-parse failure so L0
+output is bit-identical (its +0.003 comes from depth paging, not from hardening):
+bucket-key **suffix union** for reworded categories (a person says the taxonomy leaf, and
+a leaf is a word-suffix of its full key), and **catalog-grounded span extraction** for
+unparsed messages (the longest message spans occurring verbatim in some product corpus
+become the query, with leftover informative tokens as a fallback bag). The L3 cost is a
+real, open tradeoff: with the bucket intact and the payload rewritten, replacing raw
+messages with grounded fragments reshapes the per-constraint weighting; two gating
+refinements (span-required, category-like-span excluded) did not close it, and the
+L4+L5 gains dwarf it.
 
 **L4 scoring above L3 is not an inversion**, and the "L3/L4 inversion" carried as an open
 bug was a category error — it cost this project time twice. L3 destroys containment and
@@ -449,14 +463,14 @@ failing the run with a non-zero exit if a later level ever scores higher. The gu
 scoped to the payload axis so it cannot be triggered by L4/L5.
 
 **L5 is the number that matters and nobody had measured it.** Degrade both signals and the
-score falls from 0.954 to **0.390** — far below the ~0.65–0.70 previously assumed as the
-pessimistic bound. The two signals are not redundant: losing either costs ~0.28, losing both
-costs 0.56.
+score fell from 0.954 to **0.402** — far below the ~0.65–0.70 previously assumed as the
+pessimistic bound. The two signals are not redundant: losing either costs ~0.26, losing both
+costs 0.55. The hardening above lifts that floor to **0.573**.
 
-Read together with the results above, that is the honest risk statement: **0.9072 held-out
-is an L0 number, and the spec permits the organizer to remove the property it depends on.**
-Nothing in the retrieval or dialog work changes this; only making `router.py` degrade more
-gracefully would.
+Read together with the results above, that is the honest risk statement: **the held-out
+numbers are L0 numbers, and the spec permits the organizer to remove the property they
+depend on.** The catalog-grounded fallbacks are the first work that addresses it; the
+pessimistic bound is now 0.573, not 0.402.
 
 ```bash
 python3 tools/robustness.py --agent pipeline --dataset data/public_set.jsonl
@@ -469,14 +483,11 @@ python3 tools/robustness.py --agent pipeline --dataset data/public_set.jsonl
   returns only comments. `PipelineAgent._ask` is still the placeholder that returns
   `"other"` every turn. **Every number in this document was produced by the placeholder**,
   so B's policy is currently unmeasured, not underperforming.
-- **L3/L4 inversion reproduced on the real catalog.** Commit `488176c`'s own ladder shows it
-  in both arms: always-10 L3 0.6516 / L4 0.7073, withholding L3 0.6675 / L4 0.6981. It is
-  therefore not an artifact of the reconstructed catalog and not specific to one agent —
-  which points at the ladder's level definitions rather than at the pipeline. The robustness ladder reports L4 (0.654) above L3 (0.616), which
-  compounding degradations cannot do; Correction 03 quotes fixed-L3 as 0.656. Unresolved.
-  The fix is a level-independence assertion in the harness, and the ladder should be rebuilt
-  on the real catalog — a ladder measured on the reconstructed catalog inherits the error
-  documented above at every level.
-- All results here are **L0 verbatim**, and L5 puts the pessimistic bound at **0.390** — the
-  real exposure, and larger than previously believed. Hardening `router.py` is the only work
-  that addresses it.
+- ~~**L3/L4 inversion.**~~ Resolved — never a bug. See "Robustness: two axes, not one
+  ladder" above: L3 and L4 degrade different signals and are not comparable;
+  `check_monotone` now asserts monotonicity over the payload axis (L0–L3) only.
+- **L3 hardening cost is open.** The grounded-query path costs 0.691 → 0.635 at L3
+  specifically (bucket intact, payload rewritten); two gating refinements did not close
+  it. Any further work must re-run the full paired ladder — L4/L5 gains must not regress.
+- All held-out results here are **L0 verbatim**; the paired-harness pessimistic bound (L5)
+  is **0.573** after hardening, up from 0.402.
