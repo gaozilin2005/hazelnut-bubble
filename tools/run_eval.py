@@ -24,15 +24,14 @@ from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool = True,
                reranker: str = "local", ranking_model: str | None = None,
                exposure_gate: bool = True, dialog: str = "integrated",
-               erase_on_override: bool = False, distill: bool = False,
-               no_repeat: bool = False):
+               erase_on_override: bool = False, tie_break_dense: bool = False):
     if name == "pipeline":
         from pipeline.agent import PipelineAgent
         return PipelineAgent(catalog, use_prior=use_prior, use_dense=use_dense,
                              reranker=reranker, ranking_model=ranking_model,
                              exposure_gate=exposure_gate, dialog=dialog,
-                             erase_on_override=erase_on_override, distill=distill,
-                             no_repeat=no_repeat)
+                             erase_on_override=erase_on_override,
+                             tie_break_dense=tie_break_dense)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -90,14 +89,23 @@ def main() -> None:
                         help="drop the superseded preference on intent override "
                              "(Pillar II slot rewriting); measured, not assumed")
     parser.add_argument("--reranker", default="local",
-                        choices=("local", "llm", "identity"),
-                        help="llm requires ANTHROPIC_API_KEY; falls back to local")
+                        choices=("local", "llm", "targeted_llm", "pairwise_llm",
+                                 "pairwise_top3_llm", "identity"),
+                        help="llm/targeted_llm/pairwise_llm/pairwise_top3_llm require "
+                             "ANTHROPIC_API_KEY; fall back to local. All targeted variants "
+                             "only call out when ambiguous; pairwise_llm asks a binary A/B "
+                             "question defaulting to keeping local #1; pairwise_top3_llm "
+                             "extends that to a #1-vs-#2-vs-#3 tournament")
     parser.add_argument("--ranking-model", default=None,
                         help="model id for --reranker llm (default claude-opus-5)")
     parser.add_argument("--no-exposure-gate", action="store_true",
                         help="disable early-turn result withholding; see README "
                              "'Exposure Gate Disclosure' -- this is the HONEST "
                              "ranking number (Score 0.9118 vs 0.9538 gated)")
+    parser.add_argument("--tie-break-dense", action="store_true",
+                        help="reorder only the band of candidates within "
+                             "TIE_BREAK_MARGIN of the rank-k cutoff by dense "
+                             "similarity; off by default, see README")
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
@@ -111,7 +119,7 @@ def main() -> None:
                        ranking_model=args.ranking_model,
                        exposure_gate=not args.no_exposure_gate,
                        dialog=args.dialog, erase_on_override=args.erase_on_override,
-                       distill=args.distill, no_repeat=args.no_repeat)
+                       tie_break_dense=args.tie_break_dense)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()

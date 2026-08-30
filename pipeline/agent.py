@@ -16,7 +16,14 @@ from pathlib import Path
 
 from pipeline.dialog import ConversationBrain, compose_message
 from pipeline.interfaces import INTENT_OVERRIDE, SharedSessionState
-from pipeline.reranker import IdentityReranker, LLMReranker, LocalReranker
+from pipeline.reranker import (
+    IdentityReranker,
+    LLMReranker,
+    LocalReranker,
+    PairwiseLLMReranker,
+    PairwiseTop3LLMReranker,
+    TargetedLLMReranker,
+)
 from pipeline.retriever import HybridRetriever
 from pipeline.router import erase_superseded, route
 
@@ -380,7 +387,7 @@ class PipelineAgent:
         rerank_pool: int = RERANK_POOL, dialog: str = "integrated",
         erase_on_override: bool = False, exposure_gate: bool = True,
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
-        distill: bool = False, no_repeat: bool = False,
+        tie_break_dense: bool = False,
     ) -> None:
         # Pillar III adaptive orchestration (--no-repeat): failure detection +
         # strategy switch. If the session reached turn N, the evaluator did not
@@ -394,7 +401,7 @@ class PipelineAgent:
         # honest, ungated ranking score); exposure/release_turn tune it when on.
         self.exposure_gate = exposure_gate
         self.retriever = HybridRetriever(
-            use_prior=use_prior, use_dense=use_dense, distill=distill
+            use_prior=use_prior, use_dense=use_dense, tie_break_dense=tie_break_dense
         )
         self.retriever.build(str(catalog_path))
         self.rerank_pool = rerank_pool
@@ -403,6 +410,18 @@ class PipelineAgent:
         self._position = {asin: i for i, asin in enumerate(self.retriever.asins)}
         if reranker == "llm":
             self.reranker = LLMReranker(
+                self.retriever, model=ranking_model or "claude-opus-5"
+            )
+        elif reranker == "targeted_llm":
+            self.reranker = TargetedLLMReranker(
+                self.retriever, model=ranking_model or "claude-opus-5"
+            )
+        elif reranker == "pairwise_llm":
+            self.reranker = PairwiseLLMReranker(
+                self.retriever, model=ranking_model or "claude-opus-5"
+            )
+        elif reranker == "pairwise_top3_llm":
+            self.reranker = PairwiseTop3LLMReranker(
                 self.retriever, model=ranking_model or "claude-opus-5"
             )
         elif reranker == "identity":
@@ -493,23 +512,7 @@ class PipelineAgent:
         route(state, user_message, turn)
         if self.erase_on_override and state.override_turn == turn:
             erase_superseded(state)
-        if self.no_repeat and (turn in OVERRIDE_WINDOW or state.override_turn == turn):
-            # CORRECTNESS, not tuning: evaluator/local_evaluator.py:252 ignores
-            # a hit until `override_applied`, so in an intent-override session
-            # anything shown before the override turn was never actually tested
-            # against the target. Those are NOT confirmed negatives, and
-            # demoting them can bury the true answer.
-            #
-            # Clearing on the PARSED override turn alone is not enough: that
-            # parse fails under paraphrasing, and then the guard never fires.
-            # Measured, on the public set with reworded messages, intent-
-            # override MRR collapsed 0.695 -> 0.287 at L1 and 0.631 -> 0.216 at
-            # L4 while every other scenario improved -- the whole paraphrase
-            # regression was this one hole. `behavior_for` draws the override
-            # turn from {3, 4}, so clearing unconditionally across that window
-            # closes it without depending on any parse succeeding.
-            self._shown.pop(session_id, None)
-        candidates = self.retriever.retrieve(state, CANDIDATE_POOL)
+        candidates = self.retriever.retrieve(state, CANDIDATE_POOL, cutoff=top_k)
         ranked = self.reranker.rerank(state, candidates[:max(self.rerank_pool, top_k)])
         # Proactive guidance: what are the surviving candidates most divided on?
         facet = (
