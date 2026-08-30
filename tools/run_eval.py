@@ -80,8 +80,13 @@ def main() -> None:
                         help="drop the superseded preference on intent override "
                              "(Pillar II slot rewriting); measured, not assumed")
     parser.add_argument("--reranker", default="local",
-                        choices=("local", "llm", "identity"),
-                        help="llm requires ANTHROPIC_API_KEY; falls back to local")
+                        choices=("local", "llm", "targeted_llm", "pairwise_llm",
+                                 "pairwise_top3_llm", "identity"),
+                        help="llm/targeted_llm/pairwise_llm/pairwise_top3_llm require "
+                             "ANTHROPIC_API_KEY; fall back to local. All targeted variants "
+                             "only call out when ambiguous; pairwise_llm asks a binary A/B "
+                             "question defaulting to keeping local #1; pairwise_top3_llm "
+                             "extends that to a #1-vs-#2-vs-#3 tournament")
     parser.add_argument("--ranking-model", default=None,
                         help="model id for --reranker llm (default claude-opus-5)")
     parser.add_argument("--no-exposure-gate", action="store_true",
