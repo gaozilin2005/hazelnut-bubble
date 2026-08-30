@@ -652,7 +652,12 @@ class PipelineAgent:
         )
         growing = len(state.constraints) > self._disclosed.get(session_id, -1)
         self._disclosed[session_id] = len(state.constraints)
-        walking = self.walk and not (
+        # `exposure_gate` is the master switch for every mechanism that shows
+        # less than the full top-k. The walk is one of those -- it is exposure
+        # control, not ranking -- so --no-exposure-gate must disable it too,
+        # otherwise that flag silently becomes a no-op (it bypasses _exposure
+        # entirely) and stops reproducing the honest ungated number.
+        walking = self.walk and self.exposure_gate and not (
             state.intent == INTENT_OVERRIDE and state.override_turn is None
         )
         if walking:

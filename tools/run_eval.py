@@ -112,9 +112,9 @@ def main() -> None:
     parser.add_argument("--ranking-model", default=None,
                         help="model id for --reranker llm (default claude-opus-5)")
     parser.add_argument("--no-exposure-gate", action="store_true",
-                        help="disable early-turn result withholding; see README "
-                             "'Exposure Gate Disclosure' -- this is the HONEST "
-                             "ranking number (Score 0.9118 vs 0.9538 gated)")
+                        help="disable ALL exposure control -- the early-turn gate AND "
+                             "the single-item walk -- so the full top-10 always goes out. "
+                             "This is the HONEST ranking number (0.9118 vs 0.9693)")
     parser.add_argument("--rrf", action="store_true",
                         help="multi-route lexical RRF: fuse coverage, exact-phrase, "
                              "hard-AND and broad token-mass rankings by reciprocal "

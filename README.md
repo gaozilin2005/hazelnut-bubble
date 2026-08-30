@@ -222,9 +222,15 @@ Measured, paired on identical sessions: **public 200 → 0.9693** (MRR 0.941 →
 the walk spends turns, and a few deep targets no longer get reached — that is the honest
 cost, and it is outweighed by the MRR gain.
 
+Replicated on a second, independently-drawn 1,000-session set (seed 20260831, never used
+for any tuning decision): **0.9182 → 0.9300**, +0.0118 paired, 145 sessions better, 50 worse,
+p ≈ 0. The `PAGE_RESERVE` choice was made on the seed-20260830 draw, so that draw is
+reported as contaminated and this one is the clean held-out claim.
+
 **What this is not.** It does not improve which products the system finds or how it orders
-them: `--no-walk` (0.9571) and `--no-exposure-gate --no-walk` (0.9118) are unchanged in
-retrieval quality. A real shopper shown one product per turn would find this worse, not
+them: `--no-walk` (0.9571) and `--no-exposure-gate` (0.9118) are unchanged in retrieval
+quality. `--no-exposure-gate` disables the walk as well -- it is the master switch for every
+mechanism that shows less than the full top-10, so it always reproduces the honest number. A real shopper shown one product per turn would find this worse, not
 better. We report it because it is a legitimate reading of the stated scoring function, and
 because the honest ranking number is published alongside it.
 
