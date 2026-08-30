@@ -422,6 +422,46 @@ you tune against a draw, that draw is training data.**
 - Use `--exclude <prior file>` for draws that must be disjoint.
 - Never report a held-out score from a seed that informed a design decision.
 
+## Robustness: two axes, not one ladder
+
+The spec (`docs/competition_specification.md:40`) reserves the organizer's right to
+paraphrase customer messages on the private set. `tools/robustness.py` re-renders each
+message at increasing paraphrase strength and rescores, without editing the evaluator.
+
+**The levels attack two independent signals and are not a single ladder.** The pipeline
+leans on verbatim phrase containment *and* on the coarse-category bucket filter, and the
+levels degrade them separately:
+
+| level | degrades | public 200 |
+|---|---|---|
+| L0 | nothing — templates verbatim | **0.954** |
+| L1 | prose reworded, payload verbatim | 0.822 |
+| L2 | payload lightly perturbed | 0.790 |
+| L3 | payload rewritten, containment destroyed | 0.668 |
+| L4 | *category* reworded, payload verbatim | 0.698 |
+| L5 | **both** — payload rewritten AND category reworded | **0.390** |
+
+**L4 scoring above L3 is not an inversion**, and the "L3/L4 inversion" carried as an open
+bug was a category error — it cost this project time twice. L3 destroys containment and
+keeps the category filter; L4 keeps containment and removes the category filter. They are
+different experiments. Only **L0–L3 is a ladder**, and `check_monotone` now asserts it,
+failing the run with a non-zero exit if a later level ever scores higher. The guard is
+scoped to the payload axis so it cannot be triggered by L4/L5.
+
+**L5 is the number that matters and nobody had measured it.** Degrade both signals and the
+score falls from 0.954 to **0.390** — far below the ~0.65–0.70 previously assumed as the
+pessimistic bound. The two signals are not redundant: losing either costs ~0.28, losing both
+costs 0.56.
+
+Read together with the results above, that is the honest risk statement: **0.9072 held-out
+is an L0 number, and the spec permits the organizer to remove the property it depends on.**
+Nothing in the retrieval or dialog work changes this; only making `router.py` degrade more
+gracefully would.
+
+```bash
+python3 tools/robustness.py --agent pipeline --dataset data/public_set.jsonl
+```
+
 ## Open
 
 - **`pipeline/dialog.py` is not wired in.** Commit `4ceb202` adds a 300-line
@@ -437,5 +477,6 @@ you tune against a draw, that draw is training data.**
   The fix is a level-independence assertion in the harness, and the ladder should be rebuilt
   on the real catalog — a ladder measured on the reconstructed catalog inherits the error
   documented above at every level.
-- All results here are **L0 verbatim**. The robustness ladder, not the held-out set, is where
-  this approach is actually at risk.
+- All results here are **L0 verbatim**, and L5 puts the pessimistic bound at **0.390** — the
+  real exposure, and larger than previously believed. Hardening `router.py` is the only work
+  that addresses it.
