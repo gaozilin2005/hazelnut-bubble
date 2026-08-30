@@ -28,7 +28,11 @@ def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool 
                no_repeat: bool = False, neg_aspects: float = 0.0,
                tie_break_dense: bool = False):
     if name == "pipeline":
-        from pipeline.agent import PipelineAgent
+        # Import the SUBMISSION entry point, not PipelineAgent directly, so every
+        # number this tool reports is measured through the same class the
+        # organizer's harness will import. Two paths would let the submitted
+        # defaults drift from the tested ones without anything failing.
+        from agent import Agent as PipelineAgent
         return PipelineAgent(catalog, use_prior=use_prior, use_dense=use_dense,
                              reranker=reranker, ranking_model=ranking_model,
                              exposure_gate=exposure_gate, dialog=dialog,

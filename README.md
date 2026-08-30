@@ -18,6 +18,27 @@ Measured on the 200-session public set against the official 50,000-product catal
 
 Both numbers are 8.5–8.9× the baseline, run in seconds with no LLM calls, and generalize to catalog products never used in the public set — on two independently-built held-out checks, one of them 1,000 sessions (see [Held-Out Generalization Check](#held-out-generalization-check)).
 
+## Coverage Against the Brief
+
+Where each pillar of the problem statement is implemented, and what it measured.
+
+| requirement | where | measured |
+|---|---|---|
+| **I — Buying/Browsing routing** | `router.py::parse_opening` | 100% intent classification and 100% category extraction on 1,000 held-out sessions |
+| **I — hybrid retrieval** | `retriever.py` (category filter + lexical) + `dense.py` (LSA cold start) | dense route +0.001; RRF fusion measured harmful and rejected |
+| **I — semantic reranking** | `reranker.py` — local coverage, four LLM variants | local ≈ identity; every LLM variant ≤ local |
+| **II — dynamic state machine, incremental slots** | `interfaces.py::SharedSessionState`, `router.py::fill_slots` | per-attribute slots rebuilt each turn from one parser |
+| **II — intent override, slot erasure** | `router.py::erase_superseded` (`--erase-on-override`) | −0.006; the simulator's old/new values come from one intent card and never truly conflict |
+| **II — retrieval cutoff on over-generality** | `agent.py` exposure gate, `AMBIGUITY_MARGIN` | +0.042; margin-based, replaced a blunt turn gate |
+| **II — proactive structured clarification** | `retriever.py::facet_split` → `dialog.py::compose_message` | prompts name the facet the live pool most disagrees on; score-neutral by construction |
+| **II — question-value estimation** | six selectable `--dialog` policies | **unrewardable**: `other` dominates by construction — see below |
+| **III — context distillation** | `distill.py` (`--distill`) | clean null across three draws |
+| **III — adaptive orchestration** | `agent.py` (`--no-repeat`) | +0.0006 under the default gate; never worsens a session |
+| **III — long-term memory** | `dialog.py::DynamicPolicy` (`--dialog dynamic`) | −0.008 public, −0.013 held-out |
+
+Everything marked as measured-and-rejected ships disabled behind a flag rather than deleted,
+so any claim here can be re-run rather than taken on trust.
+
 ## Architecture
 
 ```
@@ -68,10 +89,30 @@ cd /path/to/hazelnut-bubble
 ls   # you should see: pipeline/  tools/  data/  evaluator/  starter/
 ```
 
-Requires Python 3.10+ and `numpy` (everything else is standard library).
+Requires Python 3.10+ (no non-default version requirement) and `numpy`; everything else is
+standard library. No environment variables are needed for the default configuration.
 
 ```bash
-pip install numpy
+pip install -r requirements.txt
+```
+
+**Submission entry point:** `agent.py` in the repository root exports `Agent`, as
+`docs/submission_rules.md` requires. It subclasses `PipelineAgent` with the exact defaults
+every reported score uses — integrated dialog policy, local reranker, exposure gate on, all
+experimental flags off. Verified to score `0.953816` when driven through the organizer's own
+`evaluate()`:
+
+```python
+from agent import Agent
+a = Agent("data/catalog.jsonl")
+a.reset("s1", user_profile)
+a.respond("s1", "I'm looking for Women Dresses. A key requirement is: cotton.", 1, 10)
+```
+
+One command to run it in the official harness:
+
+```bash
+python3 tools/run_eval.py --agent pipeline --dataset data/public_set.jsonl
 ```
 
 Download the official frozen catalog from the organizer's participant-kit release and verify it:
@@ -363,4 +404,42 @@ We kept this code in the repository, disabled by measured constant rather than d
 
 ## Model Choice, Cost, and Network Dependency
 
-**The default pipeline (`--reranker local`, the default) makes zero model API calls and requires no network access or credentials at scoring time.** All reported scores above use this default. The optional LLM reranking stage (`--reranker llm`) requires an `ANTHROPIC_API_KEY` and was measured once on `claude-haiku-4-5` at ~$0.29 for a full 200-session run (~215K prompt + ~14K completion tokens); it is disabled by default because it measured worse (see above).
+**The default pipeline makes zero model API calls and requires no network access or
+credentials at scoring time.** All reported scores use this default.
+
+### Latency
+
+Measured on the 200 public sessions, Apple Silicon laptop, single process, no GPU.
+
+| stage | time |
+|---|---|
+| index build (50,000 products) — one-off per process | 60.7 s |
+| **per turn — median** | **1.8 ms** |
+| per turn — p95 | 16.0 ms |
+| per turn — max | 31.3 ms |
+| per session (all turns) | 18.9 ms |
+| 200 sessions end to end, after build | 3.8 s |
+
+The fixed index build dominates any single run; per-turn cost is milliseconds because the
+default path is pure NumPy and Python with no model call and no I/O.
+
+### Token usage and cost
+
+| configuration | tokens | cost | latency impact |
+|---|---|---|---|
+| **default (`--reranker local`)** | **0** | **$0.00** | as above |
+| `--reranker llm` (blanket listwise) | 174,221 | ~$0.29 | network round-trip per turn |
+| `--reranker targeted_llm` (top-12) | 99,380 | ~$0.17 | as above |
+| `--reranker pairwise_llm` (top-2) | 68,152 | ~$0.12 | as above |
+| `--reranker pairwise_top3_llm` | 133,453 | ~$0.22 | as above |
+
+All LLM variants use `claude-haiku-4-5`, require `ANTHROPIC_API_KEY`, and are **disabled by
+default** because each measured equal or worse than the local ranker (see
+[What We Tried and Rejected](#what-we-tried-and-rejected)). Every one falls back to the local
+ranking on missing credentials, missing network, or a malformed response — verified to
+reproduce the exact local score of `0.953816` at zero tokens with no key present.
+
+**Network dependency:** none in the default configuration. The rules note that final scoring
+may run with network access disabled; the submitted default is built for that case, which is
+why `pipeline/dense.py` is an in-process NumPy LSA index rather than a downloaded
+transformer.
