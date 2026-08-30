@@ -28,6 +28,10 @@ from pipeline.retriever import HybridRetriever
 from pipeline.router import erase_superseded, route
 
 CANDIDATE_POOL = 200
+# evaluator/local_evaluator.py::behavior_for draws the intent-override turn from
+# {3, 4}. Anything shown before it was never tested against the target, so
+# rejection memory is discarded across that window regardless of what parsed.
+OVERRIDE_WINDOW = (3, 4)
 # How many retrieved candidates the reranker may reorder. Reordering a pool
 # wider than top_k can pull the target INTO the top 10 earlier (better MTTC) but
 # can also push it out (worse Hit@10), so the width is measured, not assumed.
@@ -385,6 +389,14 @@ class PipelineAgent:
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
         tie_break_dense: bool = False,
     ) -> None:
+        # Pillar III adaptive orchestration (--no-repeat): failure detection +
+        # strategy switch. If the session reached turn N, the evaluator did not
+        # find the target in anything shown at turns 1..N-1, so those items are
+        # confirmed non-targets; re-showing them is the "closed feedback loop"
+        # the conversational-recommender literature warns about. Off by
+        # default; measured, see README.
+        self.no_repeat = no_repeat
+        self._shown: dict[str, set[str]] = {}
         # exposure_gate is the on/off switch (--no-exposure-gate reproduces the
         # honest, ungated ranking score); exposure/release_turn tune it when on.
         self.exposure_gate = exposure_gate
@@ -435,6 +447,10 @@ class PipelineAgent:
             session_id=session_id,
             user_profile=profile,
         )
+        # Session ids are unique per session, so this is hygiene rather than a
+        # live bug -- but reusing an id without clearing would silently treat a
+        # previous session's rejections as this one's.
+        self._shown.pop(session_id, None)
 
         self.brain.reset(
             session_id=session_id,
@@ -460,6 +476,22 @@ class PipelineAgent:
         s1 = self.retriever.score(i1, state, blob)
         ambiguous = (s0 - s1) <= AMBIGUITY_MARGIN * max(abs(s0), 1e-6)
         return self.exposure if ambiguous else top_k
+
+    def _drop_seen(
+        self, session_id: str, ranked: list[tuple[str, float]]
+    ) -> list[tuple[str, float]]:
+        """Move already-rejected candidates to the back rather than deleting them.
+
+        Reordering, not filtering: if every remaining candidate has been shown
+        the agent still has to answer, and an empty list scores strictly worse
+        than a repeated one. Demoting keeps the fallback automatic.
+        """
+        seen = self._shown.get(session_id)
+        if not seen:
+            return ranked
+        fresh = [row for row in ranked if row[0] not in seen]
+        stale = [row for row in ranked if row[0] in seen]
+        return fresh + stale
 
     def _usage_delta(self) -> dict:
         prompt = getattr(self.reranker, "prompt_tokens", 0)
@@ -496,12 +528,19 @@ class PipelineAgent:
             else self.dialog.ask(state)
         )
 
+        if self.no_repeat:
+            ranked = self._drop_seen(session_id, ranked)
+
+        exposed = [asin for asin, _ in ranked[:self._exposure(state, ranked, top_k)]]
+        if self.no_repeat:
+            self._shown.setdefault(session_id, set()).update(exposed)
+
         return {
             "message": message,
             "ask_attribute": attribute,
             "recommendations": [
                 {"parent_asin": asin}
-                for asin, _ in ranked[:self._exposure(state, ranked, top_k)]
+                for asin in exposed
             ],
             # The evaluator SUMS usage across turns, so report the delta since the
             # last turn, not the reranker's running total. Reporting the total

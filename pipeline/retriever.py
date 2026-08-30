@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from pipeline.dense import DenseIndex
+from pipeline.distill import live_discriminance, merge_redundant
 from pipeline.interfaces import (
     INTENT_BROWSING,
     SharedSessionState,
@@ -268,8 +269,39 @@ class HybridRetriever:
         fails, and returns catalog order.
         """
         if state.constraints:
+            if self.distill:
+                return merge_redundant(state.constraints)
             return state.constraints
         return [message for message in state.messages if message.strip()]
+
+    def _satisfies(self, index: int, constraint: str) -> bool:
+        """Same containment test the scorer uses, as a hard yes/no."""
+        corpus = self.corpora[index]
+        text = normalize(constraint)
+        if not text:
+            return False
+        tokens = [t for t in terms(text) if t in self.idf]
+        if not tokens:
+            return False
+        return text in corpus or all(t in corpus for t in tokens)
+
+    def _distil_weights(
+        self, state: SharedSessionState, candidates: list[int]
+    ) -> dict[str, float]:
+        """Per-constraint weights from the live pool, cached for this ranking pass.
+
+        Computed once per retrieve() rather than per candidate: it is O(pool x
+        constraints) and the scorer is called once per candidate, so folding it
+        into score() would make ranking quadratic.
+        """
+        constraints = self._query_terms(state)
+        if not constraints or not candidates:
+            return {}
+        counts = {
+            constraint: sum(1 for i in candidates if self._satisfies(i, constraint))
+            for constraint in constraints
+        }
+        return live_discriminance(constraints, counts, len(candidates))
 
     def _blob(self, state: SharedSessionState) -> str:
         return normalize(" ".join(state.messages))
@@ -314,7 +346,9 @@ class HybridRetriever:
             coverage = matched / mass
             if len(constraint) > 12 and normalize(constraint) in corpus:
                 coverage *= PHRASE_BONUS
-            total += coverage * math.log1p(mass)
+            # Distillation reweights by live-pool discriminance; absent it the
+            # weight is 1.0 and this is the original scorer exactly.
+            total += coverage * math.log1p(mass) * self._weights.get(constraint, 1.0)
         return total
 
     def _query_text(self, state: SharedSessionState) -> str:
@@ -463,6 +497,13 @@ class HybridRetriever:
         else:
             # Filter track: rank by literal constraint matching.
             blob = self._blob(state)
+            # Set for the whole turn, not just this sort: the reranker and the
+            # exposure gate both call score() afterwards, and they must see the
+            # same weighting that produced the ranking they are reasoning about.
+            # Recomputed on every retrieve(), so it never goes stale across turns.
+            self._weights = (
+                self._distil_weights(state, candidates) if self.distill else {}
+            )
             ordered = sorted(
                 candidates, key=lambda index: (-self.score(index, state, blob), index)
             )

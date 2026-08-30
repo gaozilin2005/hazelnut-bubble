@@ -77,6 +77,14 @@ def main() -> None:
                                  "brain-simulator", "brain-fixed", "dynamic"),
                         help="question policy: wildcard is the placeholder baseline; "
                              "brain-* use pipeline/dialog.py (B)")
+    parser.add_argument("--no-repeat", action="store_true",
+                        help="Pillar III adaptive orchestration: demote candidates "
+                             "already shown and rejected in this session; off by "
+                             "default, see README")
+    parser.add_argument("--distill", action="store_true",
+                        help="Pillar III context distillation: merge redundant "
+                             "constraints and reweight by live-pool discriminance "
+                             "(pipeline/distill.py); off by default, see README")
     parser.add_argument("--erase-on-override", action="store_true",
                         help="drop the superseded preference on intent override "
                              "(Pillar II slot rewriting); measured, not assumed")
@@ -126,6 +134,8 @@ def main() -> None:
             "reranker": args.reranker if args.agent == "pipeline" else None,
             "dialog": args.dialog if args.agent == "pipeline" else None,
             "erase_on_override": args.erase_on_override,
+            "distill": args.distill,
+            "no_repeat": args.no_repeat,
             "exposure_gate": not args.no_exposure_gate,
             "use_prior": not args.no_prior,
             "use_dense": not args.no_dense,
@@ -144,6 +154,8 @@ def main() -> None:
     # silently destroyed the first.
     suffix = f"_{args.dialog}" if args.agent == "pipeline" and args.dialog != "integrated" else ""
     suffix += "_erase" if args.erase_on_override else ""
+    suffix += "_distill" if args.distill else ""
+    suffix += "_norepeat" if args.no_repeat else ""
     # Any flag that changes the score must change the filename, or one run
     # silently overwrites another. This one was missed once already.
     suffix += "_ungated" if args.no_exposure_gate else ""
