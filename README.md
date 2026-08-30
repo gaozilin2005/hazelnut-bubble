@@ -207,6 +207,45 @@ candidate pool's most-divided facet — *"I'm still seeing both polyester and sp
 — does either sound right?"* — never repeating a facet, and never offering a value the
 customer has already stated. Identical score, a transcript worth reading.
 
+## Pillar III: Self-Evolution (Dynamic Context Programming)
+
+The brief asks for two things under Pillar III — *Runtime Adaptation* ("Personalized Context Distillation, continuously updating short-term session states and long-term user profiles") and *Adaptive Orchestration* ("runtime workflow re-orchestration and strategy alignment"). The repo's own spec phrases the same pair as "dynamic context construction" and "failure detection, strategy switching". Three mechanisms exist, split across two people:
+
+**Long-term memory, question channel (Person B, `--dialog dynamic`).** `DynamicPolicy` keeps `attribute_stats` on the agent object, which the evaluator constructs once and reuses across every session — so it accumulates evidence about which question attributes actually yield disclosure, and carries it between sessions. That is the "long-term" half of runtime adaptation.
+
+**Context distillation, retrieval channel (`--distill`, `pipeline/distill.py`).** Before this, `state.constraints` was an append-only log: every disclosed string kept forever, scored independently, never merged or reweighted. Two operations, following the ADD/MERGE/DELETE shape that agent-memory systems converge on ([self-evolving agent survey, arXiv:2507.21046](https://arxiv.org/html/2507.21046v4)) — ADD and DELETE already existed (the router appends; `erase_superseded` deletes), so what was missing was MERGE:
+
+- `merge_redundant()` collapses constraints restating one fact. A real traced session disclosed both `"leather"` and `"100% Leather"` — one fact scored twice, so a product naming leather twice outranked one naming it once as precisely.
+- `live_discriminance()` reweights by self-information `−log₂(p)` over the **live candidate pool** rather than global catalog IDF. Global IDF asks "how rare is this word in the catalog"; after a category filter has run, that is the wrong question — inside "women's leather riding boots" *every* candidate says leather, so it is globally rare and locally worthless.
+
+**Adaptive orchestration (`--no-repeat`).** Failure detection plus strategy switch. If a session reached turn N, the evaluator found no target in turns 1..N−1, so those items are confirmed negatives; re-showing them is the closed feedback loop the [conversational-recommender survey](https://www.sciencedirect.com/science/article/pii/S2666651021000164) describes ("when a user rejects a recommendation, the system stays at the same vertex"). Rejected candidates are demoted — *demoted, not filtered*, so an all-seen list still returns ten results rather than going empty.
+
+### Measured
+
+| | public | held-1000 | held-200 |
+|---|---|---|---|
+| neither (default) | **0.9538** | 0.8545 | 0.8452 |
+| `--distill` | 0.9534 | 0.8529 | 0.8464 |
+| `--no-repeat` | 0.9540 | **0.8574** | **0.8472** |
+| both | 0.9573\* | 0.8585\* | — |
+
+\*measured before the correctness fix below; see it for why those numbers are not the ones to use.
+
+**Distillation is a clean null** — −0.0004 / −0.0016 / +0.0012, mixed signs, all noise. Worth more than a single-draw result precisely because three independent draws agree there is no effect.
+
+**Orchestration is a small, consistent positive** — +0.0002 / +0.0029 / +0.0020, never negative on any dataset, and exactly baseline at every paraphrase level L0–L4. Session-level diff on the 1,000-session set: 63 sessions improved rank, **0 worsened**, Hit@10 unchanged. Hit@10 cannot change by construction: `ranked` is `candidates[:max(rerank_pool, top_k)]`, i.e. the top ten only, so demotion reorders within what was already going to be shown and can never pull in rank 11+. This is a ranking-quality improvement, not extra catalog coverage.
+
+### A correctness bug worth recording
+
+The first version of `--no-repeat` scored considerably better on the public set (+0.0039) and we nearly reported that. It was partly a bug. `evaluator/local_evaluator.py:252` ignores a hit until `override_applied`, so in an intent-override session anything shown before the override turn was **never tested** against the target and is not a confirmed negative. The guard that cleared memory on override depended on *parsing* the override message — and paraphrasing breaks that parse. Per-scenario measurement found the whole paraphrase regression sitting in one place:
+
+| scenario | L1 MRR | L4 MRR |
+|---|---|---|
+| browsing / buying / boundary | all improved | all improved |
+| **intent_override** | **0.695 → 0.287** | **0.631 → 0.216** |
+
+`behavior_for` draws the override turn from `{3, 4}`, so the fix discards rejection memory across that window unconditionally, independent of any parse succeeding. That restored override MRR exactly to baseline at every level — and roughly halved the apparent gain, which is the honest size of the effect.
+
 ## Held-Out Generalization Check
 
 Every number in the Results table comes from the 200 public sessions, which every design decision in this repository was tuned and measured against. Two independently-built tools check generalization to catalog products that were **never** a public target, both reusing the evaluator's own session-generation logic (`materialize_hidden_fields`) — the identical mechanism the organizer uses to build the 800 private sessions:

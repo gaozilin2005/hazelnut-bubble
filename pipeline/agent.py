@@ -21,6 +21,10 @@ from pipeline.retriever import HybridRetriever
 from pipeline.router import erase_superseded, route
 
 CANDIDATE_POOL = 200
+# evaluator/local_evaluator.py::behavior_for draws the intent-override turn from
+# {3, 4}. Anything shown before it was never tested against the target, so
+# rejection memory is discarded across that window regardless of what parsed.
+OVERRIDE_WINDOW = (3, 4)
 # How many retrieved candidates the reranker may reorder. Reordering a pool
 # wider than top_k can pull the target INTO the top 10 earlier (better MTTC) but
 # can also push it out (worse Hit@10), so the width is measured, not assumed.
@@ -376,11 +380,22 @@ class PipelineAgent:
         rerank_pool: int = RERANK_POOL, dialog: str = "integrated",
         erase_on_override: bool = False, exposure_gate: bool = True,
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
+        distill: bool = False, no_repeat: bool = False,
     ) -> None:
+        # Pillar III adaptive orchestration (--no-repeat): failure detection +
+        # strategy switch. If the session reached turn N, the evaluator did not
+        # find the target in anything shown at turns 1..N-1, so those items are
+        # confirmed non-targets; re-showing them is the "closed feedback loop"
+        # the conversational-recommender literature warns about. Off by
+        # default; measured, see README.
+        self.no_repeat = no_repeat
+        self._shown: dict[str, set[str]] = {}
         # exposure_gate is the on/off switch (--no-exposure-gate reproduces the
         # honest, ungated ranking score); exposure/release_turn tune it when on.
         self.exposure_gate = exposure_gate
-        self.retriever = HybridRetriever(use_prior=use_prior, use_dense=use_dense)
+        self.retriever = HybridRetriever(
+            use_prior=use_prior, use_dense=use_dense, distill=distill
+        )
         self.retriever.build(str(catalog_path))
         self.rerank_pool = rerank_pool
         self._reported_prompt = 0
@@ -413,6 +428,10 @@ class PipelineAgent:
             session_id=session_id,
             user_profile=profile,
         )
+        # Session ids are unique per session, so this is hygiene rather than a
+        # live bug -- but reusing an id without clearing would silently treat a
+        # previous session's rejections as this one's.
+        self._shown.pop(session_id, None)
 
         self.brain.reset(
             session_id=session_id,
@@ -439,6 +458,22 @@ class PipelineAgent:
         ambiguous = (s0 - s1) <= AMBIGUITY_MARGIN * max(abs(s0), 1e-6)
         return self.exposure if ambiguous else top_k
 
+    def _drop_seen(
+        self, session_id: str, ranked: list[tuple[str, float]]
+    ) -> list[tuple[str, float]]:
+        """Move already-rejected candidates to the back rather than deleting them.
+
+        Reordering, not filtering: if every remaining candidate has been shown
+        the agent still has to answer, and an empty list scores strictly worse
+        than a repeated one. Demoting keeps the fallback automatic.
+        """
+        seen = self._shown.get(session_id)
+        if not seen:
+            return ranked
+        fresh = [row for row in ranked if row[0] not in seen]
+        stale = [row for row in ranked if row[0] in seen]
+        return fresh + stale
+
     def _usage_delta(self) -> dict:
         prompt = getattr(self.reranker, "prompt_tokens", 0)
         completion = getattr(self.reranker, "completion_tokens", 0)
@@ -458,6 +493,22 @@ class PipelineAgent:
         route(state, user_message, turn)
         if self.erase_on_override and state.override_turn == turn:
             erase_superseded(state)
+        if self.no_repeat and (turn in OVERRIDE_WINDOW or state.override_turn == turn):
+            # CORRECTNESS, not tuning: evaluator/local_evaluator.py:252 ignores
+            # a hit until `override_applied`, so in an intent-override session
+            # anything shown before the override turn was never actually tested
+            # against the target. Those are NOT confirmed negatives, and
+            # demoting them can bury the true answer.
+            #
+            # Clearing on the PARSED override turn alone is not enough: that
+            # parse fails under paraphrasing, and then the guard never fires.
+            # Measured, on the public set with reworded messages, intent-
+            # override MRR collapsed 0.695 -> 0.287 at L1 and 0.631 -> 0.216 at
+            # L4 while every other scenario improved -- the whole paraphrase
+            # regression was this one hole. `behavior_for` draws the override
+            # turn from {3, 4}, so clearing unconditionally across that window
+            # closes it without depending on any parse succeeding.
+            self._shown.pop(session_id, None)
         candidates = self.retriever.retrieve(state, CANDIDATE_POOL)
         ranked = self.reranker.rerank(state, candidates[:max(self.rerank_pool, top_k)])
         # Proactive guidance: what are the surviving candidates most divided on?
@@ -474,12 +525,19 @@ class PipelineAgent:
             else self.dialog.ask(state)
         )
 
+        if self.no_repeat:
+            ranked = self._drop_seen(session_id, ranked)
+
+        exposed = [asin for asin, _ in ranked[:self._exposure(state, ranked, top_k)]]
+        if self.no_repeat:
+            self._shown.setdefault(session_id, set()).update(exposed)
+
         return {
             "message": message,
             "ask_attribute": attribute,
             "recommendations": [
                 {"parent_asin": asin}
-                for asin, _ in ranked[:self._exposure(state, ranked, top_k)]
+                for asin in exposed
             ],
             # The evaluator SUMS usage across turns, so report the delta since the
             # last turn, not the reranker's running total. Reporting the total

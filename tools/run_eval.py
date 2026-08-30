@@ -24,13 +24,15 @@ from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool = True,
                reranker: str = "local", ranking_model: str | None = None,
                exposure_gate: bool = True, dialog: str = "integrated",
-               erase_on_override: bool = False):
+               erase_on_override: bool = False, distill: bool = False,
+               no_repeat: bool = False):
     if name == "pipeline":
         from pipeline.agent import PipelineAgent
         return PipelineAgent(catalog, use_prior=use_prior, use_dense=use_dense,
                              reranker=reranker, ranking_model=ranking_model,
                              exposure_gate=exposure_gate, dialog=dialog,
-                             erase_on_override=erase_on_override)
+                             erase_on_override=erase_on_override, distill=distill,
+                             no_repeat=no_repeat)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -76,6 +78,14 @@ def main() -> None:
                                  "brain-simulator", "brain-fixed", "dynamic"),
                         help="question policy: wildcard is the placeholder baseline; "
                              "brain-* use pipeline/dialog.py (B)")
+    parser.add_argument("--no-repeat", action="store_true",
+                        help="Pillar III adaptive orchestration: demote candidates "
+                             "already shown and rejected in this session; off by "
+                             "default, see README")
+    parser.add_argument("--distill", action="store_true",
+                        help="Pillar III context distillation: merge redundant "
+                             "constraints and reweight by live-pool discriminance "
+                             "(pipeline/distill.py); off by default, see README")
     parser.add_argument("--erase-on-override", action="store_true",
                         help="drop the superseded preference on intent override "
                              "(Pillar II slot rewriting); measured, not assumed")
@@ -100,7 +110,8 @@ def main() -> None:
                        use_dense=not args.no_dense, reranker=args.reranker,
                        ranking_model=args.ranking_model,
                        exposure_gate=not args.no_exposure_gate,
-                       dialog=args.dialog, erase_on_override=args.erase_on_override)
+                       dialog=args.dialog, erase_on_override=args.erase_on_override,
+                       distill=args.distill, no_repeat=args.no_repeat)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()
@@ -115,6 +126,8 @@ def main() -> None:
             "reranker": args.reranker if args.agent == "pipeline" else None,
             "dialog": args.dialog if args.agent == "pipeline" else None,
             "erase_on_override": args.erase_on_override,
+            "distill": args.distill,
+            "no_repeat": args.no_repeat,
             "exposure_gate": not args.no_exposure_gate,
             "use_prior": not args.no_prior,
             "use_dense": not args.no_dense,
@@ -133,6 +146,8 @@ def main() -> None:
     # silently destroyed the first.
     suffix = f"_{args.dialog}" if args.agent == "pipeline" and args.dialog != "integrated" else ""
     suffix += "_erase" if args.erase_on_override else ""
+    suffix += "_distill" if args.distill else ""
+    suffix += "_norepeat" if args.no_repeat else ""
     # Any flag that changes the score must change the filename, or one run
     # silently overwrites another. This one was missed once already.
     suffix += "_ungated" if args.no_exposure_gate else ""
