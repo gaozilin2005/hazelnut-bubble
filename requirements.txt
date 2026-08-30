@@ -1,0 +1,4 @@
+# Sole third-party dependency: pipeline/dense.py builds its LSA index in NumPy
+# (TF-IDF -> randomized SVD -> cosine). No transformer download, no GPU, no
+# network at scoring time.
+numpy>=1.24
