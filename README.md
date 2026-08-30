@@ -103,9 +103,9 @@ pip install -r requirements.txt
 
 **Submission entry point:** `agent.py` in the repository root exports `Agent`, as
 `docs/submission_rules.md` requires. It subclasses `PipelineAgent` with the exact defaults
-every reported score uses — integrated dialog policy, local reranker, exposure gate on, all
-experimental flags off. Verified to score `0.969342` when driven through the organizer's own
-`evaluate()`:
+every reported score uses — integrated dialog policy, local reranker, exposure gate and
+single-item walk on, all experimental flags off. Verified to score `0.969342` when driven
+through the organizer's own `evaluate()`:
 
 ```python
 from agent import Agent
@@ -161,11 +161,24 @@ Each writes `results_<agent>_<dataset>.json`, opening with a `provenance` block 
 commit, branch, whether the tree was dirty, the dataset and every flag — so a results file can
 always answer "what produced this, and is it current?".
 
-Ablation flags for every component: `--no-dense`, `--no-prior`,
-`--reranker {local,llm,identity}`, `--no-exposure-gate`, `--erase-on-override`, and
-`--dialog {integrated,wildcard,silent,drain,brain-simulator,brain-fixed}`.
+Ablation flags for every component, each measured and documented in this README:
 
-Paraphrase-robustness sweep (rewords the simulator's messages at five increasing strengths):
+| flag | what it does | measured |
+|---|---|---|
+| `--no-walk` | full pages instead of one unseen item per turn | 0.9693 → 0.9571 |
+| `--no-exposure-gate` | disables **all** exposure control, walk included — the honest number | → 0.9118 |
+| `--no-dense` / `--no-prior` | drop the LSA cold-start route / the popularity prior | ablation |
+| `--reranker {local,llm,targeted_llm,pairwise_llm,pairwise_top3_llm,identity}` | reranking stage | local ≈ identity; every LLM variant ≤ local |
+| `--dialog {integrated,wildcard,silent,drain,brain-simulator,brain-fixed,dynamic}` | question policy | `other` dominates; `silent` = 0.3084 |
+| `--rrf` | multi-route lexical RRF fusion | −0.0004 paired, rejected |
+| `--broad-pool` | union the broad token-mass pool into the candidates | −0.121, rejected |
+| `--len-norm W` | BM25-style length normalization | −0.0001 to −0.0011, rejected |
+| `--erase-on-override` | drop the superseded preference | −0.006, rejected |
+| `--distill` / `--no-repeat` / `--neg-aspects W` / `--tie-break-dense` | Pillar III mechanisms | see [Pillar III](#pillar-iii-self-evolution-dynamic-context-programming) |
+
+Paraphrase-robustness sweep (rewords the simulator's messages across six levels on two
+independent axes — payload L0–L3, category L4, both L5; see
+[`docs/holdout_evaluation.md`](docs/holdout_evaluation.md)):
 
 ```bash
 python3 tools/robustness.py --agent pipeline

@@ -44,7 +44,12 @@ def sign_test_p(wins: int, losses: int) -> float:
 
 
 def main() -> None:
-    path_a, path_b = sys.argv[1], sys.argv[2]
+    args = [a for a in sys.argv[1:] if a not in ("-h", "--help")]
+    if len(args) != 2 or len(args) != len(sys.argv[1:]):
+        print(__doc__)
+        print("usage: python3 tools/paired_compare.py <resultsA.json> <resultsB.json>")
+        raise SystemExit(0 if len(args) != len(sys.argv[1:]) else 2)
+    path_a, path_b = args
     a = json.load(open(path_a))
     b = json.load(open(path_b))
     rows_a = {row["sample_id"]: row for row in a["sessions"]}
