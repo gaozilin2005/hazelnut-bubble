@@ -383,11 +383,14 @@ class PipelineAgent:
         rerank_pool: int = RERANK_POOL, dialog: str = "integrated",
         erase_on_override: bool = False, exposure_gate: bool = True,
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
+        tie_break_dense: bool = False,
     ) -> None:
         # exposure_gate is the on/off switch (--no-exposure-gate reproduces the
         # honest, ungated ranking score); exposure/release_turn tune it when on.
         self.exposure_gate = exposure_gate
-        self.retriever = HybridRetriever(use_prior=use_prior, use_dense=use_dense)
+        self.retriever = HybridRetriever(
+            use_prior=use_prior, use_dense=use_dense, tie_break_dense=tie_break_dense
+        )
         self.retriever.build(str(catalog_path))
         self.rerank_pool = rerank_pool
         self._reported_prompt = 0
@@ -477,7 +480,7 @@ class PipelineAgent:
         route(state, user_message, turn)
         if self.erase_on_override and state.override_turn == turn:
             erase_superseded(state)
-        candidates = self.retriever.retrieve(state, CANDIDATE_POOL)
+        candidates = self.retriever.retrieve(state, CANDIDATE_POOL, cutoff=top_k)
         ranked = self.reranker.rerank(state, candidates[:max(self.rerank_pool, top_k)])
         # Proactive guidance: what are the surviving candidates most divided on?
         facet = (
