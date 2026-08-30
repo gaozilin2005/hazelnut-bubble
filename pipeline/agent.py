@@ -387,15 +387,15 @@ class PipelineAgent:
         rerank_pool: int = RERANK_POOL, dialog: str = "integrated",
         erase_on_override: bool = False, exposure_gate: bool = True,
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
-        distill: bool = False, no_repeat: bool = False,
-        neg_aspects: float = 0.0, tie_break_dense: bool = False,
+        distill: bool = False, no_repeat: bool = True,
+        neg_aspects: float = 1.0, tie_break_dense: bool = False,
     ) -> None:
-        # Pillar III adaptive orchestration (--no-repeat): failure detection +
-        # strategy switch. If the session reached turn N, the evaluator did not
-        # find the target in anything shown at turns 1..N-1, so those items are
+        # Pillar III adaptive orchestration: failure detection + strategy
+        # switch. If the session reached turn N, the evaluator did not find the
+        # target in anything shown at turns 1..N-1, so those items are
         # confirmed non-targets; re-showing them is the "closed feedback loop"
-        # the conversational-recommender literature warns about. Off by
-        # default; measured, see README.
+        # the conversational-recommender literature warns about. ON by default
+        # (--allow-repeats ablates); measured on four draws, see README.
         self.no_repeat = no_repeat
         self.neg_aspects = neg_aspects
         # Rejection memory feeds BOTH mechanisms -- item-level demotion and

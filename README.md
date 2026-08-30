@@ -18,6 +18,15 @@ Measured on the 200-session public set against the official 50,000-product catal
 
 Both numbers are 8.5–8.9× the baseline, run in seconds with no LLM calls, and generalize to catalog products never used in the public set — on two independently-built held-out checks, one of them 1,000 sessions (see [Held-Out Generalization Check](#held-out-generalization-check)).
 
+The public set is **saturated** — Hit@10 is already 1.000 with the exposure gate off, so there are no missed targets left to find and no change to this table can improve it. The numbers that still move, and that resemble the organizer's private 800, are held-out:
+
+| ungated (honest ranking) | Hit@10 | TechnicalScore |
+|---|---|---|
+| held-out 1,000 sessions (broad) | 0.983 | **0.8737** |
+| held-out 200, seed 7 (never tuned against) | 0.955 | **0.8585** |
+
+Both are +0.019 over the same system with rejection feedback ablated — see [Pillar III](#pillar-iii-self-evolution-dynamic-context-programming).
+
 ## Architecture
 
 ```
@@ -243,9 +252,9 @@ The brief asks for two things under Pillar III — *Runtime Adaptation* ("Person
 - `merge_redundant()` collapses constraints restating one fact. A real traced session disclosed both `"leather"` and `"100% Leather"` — one fact scored twice, so a product naming leather twice outranked one naming it once as precisely.
 - `live_discriminance()` reweights by self-information `−log₂(p)` over the **live candidate pool** rather than global catalog IDF. Global IDF asks "how rare is this word in the catalog"; after a category filter has run, that is the wrong question — inside "women's leather riding boots" *every* candidate says leather, so it is globally rare and locally worthless.
 
-**Adaptive orchestration (`--no-repeat`).** Failure detection plus strategy switch. If a session reached turn N, the evaluator found no target in turns 1..N−1, so those items are confirmed negatives; re-showing them is the closed feedback loop the [conversational-recommender survey](https://www.sciencedirect.com/science/article/pii/S2666651021000164) describes ("when a user rejects a recommendation, the system stays at the same vertex"). Rejected candidates are demoted — *demoted, not filtered*, so an all-seen list still returns ten results rather than going empty.
+**Adaptive orchestration (on by default; ablate with `--allow-repeats`).** Failure detection plus strategy switch. If a session reached turn N, the evaluator found no target in turns 1..N−1, so those items are confirmed negatives; re-showing them is the closed feedback loop the [conversational-recommender survey](https://www.sciencedirect.com/science/article/pii/S2666651021000164) describes ("when a user rejects a recommendation, the system stays at the same vertex"). Rejected candidates are demoted — *demoted, not filtered*, so an all-seen list still returns ten results rather than going empty.
 
-**Aspect-level negative feedback (`--neg-aspects W`).** The same rejection signal, used for far more. Bi et al., ["Conversational Product Search Based on Negative Feedback"](https://arxiv.org/abs/1909.02071) (CIKM 2019), report that decomposing a rejection into fine-grained **aspect-value pairs** significantly beats *item-level* negative feedback — and `--no-repeat` is exactly that item-level baseline. A rejected black nylon jacket is evidence against *black* and against *nylon*, not merely against that one listing. Each rejected item is decomposed over `FACET_VOCABULARY`, and candidates sharing those values are penalised in proportion to how many rejections exhibited them. Values the customer explicitly disclosed are never penalised: they asked for it, so its presence among rejects says nothing.
+**Aspect-level negative feedback (on by default at W=1.0; ablate with `--neg-aspects 0`).** The same rejection signal, used for far more. Bi et al., ["Conversational Product Search Based on Negative Feedback"](https://arxiv.org/abs/1909.02071) (CIKM 2019), report that decomposing a rejection into fine-grained **aspect-value pairs** significantly beats *item-level* negative feedback — and repeat-suppression is exactly that item-level baseline. A rejected black nylon jacket is evidence against *black* and against *nylon*, not merely against that one listing. Each rejected item is decomposed over `FACET_VOCABULARY`, and candidates sharing those values are penalised in proportion to how many rejections exhibited them. Values the customer explicitly disclosed are never penalised: they asked for it, so its presence among rejects says nothing.
 
 Classical Rocchio weights negative evidence far below positive (γ≈0.2 against β≈0.8) because human relevance judgements are noisy. Ours are not — reaching turn N *proves* the evaluator found no target earlier — so the weight was swept rather than inherited, and the response is flat from W=1 to W=8.
 
@@ -255,11 +264,11 @@ Each flag alone against the shared baseline, on four draws — the public set, t
 
 | | public | held-1000 | held-200 (s.20260829) | held-200 (s.7) |
 |---|---|---|---|---|
-| baseline (shipped default) | **0.9538** | 0.8545 | 0.8452 | 0.8404 |
+| all off (ablated baseline) | **0.9538** | 0.8545 | 0.8452 | 0.8404 |
 | `--distill` | 0.9534 | 0.8529 | 0.8464 | — |
-| `--no-repeat` | 0.9540 | 0.8574 | 0.8472 | 0.8412 |
+| repeat-suppression only | 0.9540 | 0.8574 | 0.8472 | 0.8412 |
 | `--neg-aspects 1.0` | 0.9538 | 0.8711 | 0.8568 | 0.8544 |
-| **`--no-repeat --neg-aspects 1.0`** | 0.9538 | **0.8737** | — | **0.8585** |
+| **both — the shipped default** | 0.9538 | **0.8737** | — | **0.8585** |
 
 **Distillation is a clean null** — −0.0004 / −0.0016 / +0.0012, mixed signs. Worth more than a single-draw result precisely because three independent draws agree there is no effect.
 
@@ -277,7 +286,9 @@ Each flag alone against the shared baseline, on four draws — the public set, t
 
 The public set is unmoved because it is saturated — Hit@10 is already 1.000 ungated, so there are no missed targets left to find there. That divergence is the point: the held-out draws are the ones that resemble the private 800.
 
-Both flags nevertheless ship **OFF**, pending a team decision on flipping the default. W=1.0 is a round value in the middle of a flat plateau rather than the argmax; W=2.0 measured marginally better on all three draws (+0.001–0.003), which is inside the plateau and not worth tuning to.
+**Both are now ON by default** (`no_repeat=True`, `neg_aspects=1.0`), ablatable with `--allow-repeats` and `--neg-aspects 0`. The default was flipped on three grounds rather than on the score alone: the gain replicates on every held-out draw including two never tuned against; it is Hit@10 rather than reordering, so it is genuinely finding targets rather than exploiting the scoring formula; and it leaves the public score byte-identical, so nothing about the headline number depends on it.
+
+W=1.0 is a round value in the middle of a flat plateau rather than the argmax; W=2.0 measured marginally better on all three draws (+0.001–0.003), which is inside the plateau and not worth tuning to.
 
 ## Held-Out Generalization Check
 
@@ -289,10 +300,11 @@ Every number in the Results table comes from the 200 public sessions, which ever
 | | official public (200) | held-out, matched (200) | held-out, broad (1,000, unmatched) |
 |---|---|---|---|
 | baseline | 0.107 | 0.187 | 0.153 |
-| this system, gated (default) | **0.9538** | 0.8941 | 0.9062 |
-| this system, ungated (honest) | 0.9118 | 0.8452 | — |
+| this system, gated (default) | **0.9538** | 0.9023 | 0.9226 |
+| this system, ungated (honest) | 0.9118 | 0.8589 | 0.8737 |
+| *same, rejection feedback ablated* | *0.9538* | *0.8452* | *0.8545* |
 
-The system generalizes on both independent checks — 4.5–5.9× the same-session baseline on unseen targets, down from 8.5–8.9× on the public set. This is real degradation, not a collapse, and the 1,000-session number is the more statistically robust of the two.
+The system generalizes on both independent checks — 4.6–6.0× the same-session baseline on unseen targets, down from 8.5–8.9× on the public set. The third row is the same tree with `--allow-repeats --neg-aspects 0`: the shipped default is +0.014/+0.019 over it here, the only place in this table where a default change is visible at all. This is real degradation, not a collapse, and the 1,000-session number is the more statistically robust of the two.
 
 One open question we have not resolved, now confirmed a second time by an independent implementation: **the baseline itself scores noticeably higher on held-out targets than on the public 200** (matched: 0.107→0.187; broad: 0.107→0.153; also confirmed across 5 further random seeds on the matched check, 0.15–0.235, so not a fluke draw). We checked category-bucket size, feature-list richness, and store-crowding as explanations for the first instance of this; none accounted for it cleanly, and it recurred under Person C's entirely separate implementation and sampling strategy. Two independent measurements agreeing on direction makes this much more likely a genuine property of the public-200-vs-catalog-at-large difficulty gap than a bug in either harness — but neither of us has explained *why*, and we're reporting that plainly rather than guessing.
 
