@@ -434,7 +434,7 @@ levels degrade them separately:
 
 | level | degrades | pre-hardening | hardened (current) |
 |---|---|---|---|
-| L0 | nothing — templates verbatim | 0.954 | **0.957** |
+| L0 | nothing — templates verbatim | 0.954 | **0.969** |
 | L1 | prose reworded, payload verbatim | 0.832 | 0.831 |
 | L2 | payload lightly perturbed | 0.789 | 0.810 |
 | L3 | payload rewritten, containment destroyed | 0.691 | 0.635 |
@@ -445,7 +445,7 @@ Both columns use the paired harness (paraphrases derived per-message from the pr
 template text, so both agents see identical wording; earlier stream-RNG numbers — L5
 0.390 among them — differ by resampling noise only). The hardened column adds two
 mechanisms to `pipeline/retriever.py`, both gated behind template-parse failure so L0
-output is bit-identical (its +0.003 comes from depth paging, not from hardening):
+output is bit-identical (its +0.015 comes from depth paging and the single-item walk, not from hardening):
 bucket-key **suffix union** for reworded categories (a person says the taxonomy leaf, and
 a leaf is a word-suffix of its full key), and **catalog-grounded span extraction** for
 unparsed messages (the longest message spans occurring verbatim in some product corpus
