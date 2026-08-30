@@ -132,7 +132,11 @@ class HybridRetriever:
     def __init__(
         self, use_prior: bool = True, use_dense: bool = True,
         tie_break_dense: bool = False, tie_break_margin: float = TIE_BREAK_MARGIN,
+        distill: bool = False,
     ) -> None:
+        # Pillar III context distillation (--distill). Restored after the #11/#12/#13
+        # merge dropped it from the signature while keeping the body that reads it.
+        self.distill = distill
         self.use_dense = use_dense
         self.tie_break_dense = tie_break_dense
         self.tie_break_margin = tie_break_margin

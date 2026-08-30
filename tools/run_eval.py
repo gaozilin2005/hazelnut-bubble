@@ -24,14 +24,16 @@ from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
 def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool = True,
                reranker: str = "local", ranking_model: str | None = None,
                exposure_gate: bool = True, dialog: str = "integrated",
-               erase_on_override: bool = False, tie_break_dense: bool = False):
+               erase_on_override: bool = False, tie_break_dense: bool = False,
+               distill: bool = False, no_repeat: bool = False):
     if name == "pipeline":
         from pipeline.agent import PipelineAgent
         return PipelineAgent(catalog, use_prior=use_prior, use_dense=use_dense,
                              reranker=reranker, ranking_model=ranking_model,
                              exposure_gate=exposure_gate, dialog=dialog,
                              erase_on_override=erase_on_override,
-                             tie_break_dense=tie_break_dense)
+                             tie_break_dense=tie_break_dense,
+                             distill=distill, no_repeat=no_repeat)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -119,7 +121,8 @@ def main() -> None:
                        ranking_model=args.ranking_model,
                        exposure_gate=not args.no_exposure_gate,
                        dialog=args.dialog, erase_on_override=args.erase_on_override,
-                       tie_break_dense=args.tie_break_dense)
+                       tie_break_dense=args.tie_break_dense,
+                       distill=args.distill, no_repeat=args.no_repeat)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()

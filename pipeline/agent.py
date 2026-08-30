@@ -387,7 +387,7 @@ class PipelineAgent:
         rerank_pool: int = RERANK_POOL, dialog: str = "integrated",
         erase_on_override: bool = False, exposure_gate: bool = True,
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
-        tie_break_dense: bool = False,
+        tie_break_dense: bool = False, distill: bool = False, no_repeat: bool = False,
     ) -> None:
         # Pillar III adaptive orchestration (--no-repeat): failure detection +
         # strategy switch. If the session reached turn N, the evaluator did not
@@ -401,7 +401,8 @@ class PipelineAgent:
         # honest, ungated ranking score); exposure/release_turn tune it when on.
         self.exposure_gate = exposure_gate
         self.retriever = HybridRetriever(
-            use_prior=use_prior, use_dense=use_dense, tie_break_dense=tie_break_dense
+            use_prior=use_prior, use_dense=use_dense, tie_break_dense=tie_break_dense,
+            distill=distill
         )
         self.retriever.build(str(catalog_path))
         self.rerank_pool = rerank_pool
