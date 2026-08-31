@@ -84,11 +84,13 @@ On Linux, substitute `sha256sum -c` for `shasum -a 256 -c`. Both lines need bash
 the `<(...)` process substitution; under plain `sh`, use
 `(cd data && grep catalog.jsonl.gz SHA256SUMS | shasum -a 256 -c -)`.
 
-### 4. Confirm the install
+### 4. Run it and check the numbers
 
-Roughly a minute each (about 60 s of that is the one-off index build). Every score is exact —
-if any differs, something in the setup is wrong, and the baseline is the most diagnostic of
-the four because it certifies the harness independently of our code.
+These four commands both verify the install and reproduce every row of the
+[Results](#results) table — a correct setup returns these scores exactly, so any difference
+means something above went wrong. The baseline is the most diagnostic of the four, because it
+certifies the harness independently of our code. Roughly a minute each, about 60 s of that
+being the one-off index build.
 
 ```bash
 python3 tools/run_eval.py --agent baseline              # -> 0.10671   organizer's BM25 reference
@@ -97,8 +99,8 @@ python3 tools/run_eval.py --agent pipeline --no-walk    # -> 0.957116  full page
 python3 tools/run_eval.py --agent pipeline --no-exposure-gate  # -> 0.911817  ranking alone
 ```
 
-Those four reproduce every row of the [Results](#results) table. Every other flag and
-evaluation is in [Reproducing Our Results](#reproducing-our-results).
+Every other flag and evaluation is in
+[Reproducing Our Results](#reproducing-our-results).
 
 ### Using the agent directly
 
