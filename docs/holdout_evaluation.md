@@ -3,8 +3,12 @@
 How we measure whether the pipeline generalises, rather than whether it memorised the
 200 released sessions.
 
-Measured 2026-08-29 on the real catalog, at commit `8e88776` (confidence-gated exposure).
-Person C owns this document.
+Person C owns this document. **Dating:** the methodology is current, and the robustness
+ladder below was re-measured on 2026-08-31 against the shipped default. The results
+tables in *Results* predate depth paging and the single-item walk — they were measured
+2026-08-29 at commit `8e88776`, and are kept because the *comparisons* in them (flag A
+vs flag B) remain valid, every arm having run without those mechanisms. Current headline
+numbers live in [`../README.md`](../README.md#results).
 
 ## Why this exists
 

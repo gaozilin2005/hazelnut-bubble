@@ -4,6 +4,26 @@ A conversational shopping agent for the TechJam 2026 "Shopping Copilot: AI Conve
 
 This document describes **our submission**. For the organizer's original challenge brief, data format, and rules, see [`docs/competition_specification.md`](docs/competition_specification.md) and the archived kit README at [`docs/original_kit_readme.md`](docs/original_kit_readme.md).
 
+## Contents
+
+- [Results](#results)
+- [Setup and Installation](#setup-and-installation)
+- [Coverage Against the Brief](#coverage-against-the-brief)
+- [Held-Out Generalization Check](#held-out-generalization-check)
+- [Architecture](#architecture)
+- [Exposure Policy](#exposure-policy)
+  - [Single-Item Walk Disclosure](#single-item-walk-disclosure)
+  - [Depth Paging After Card Drain](#depth-paging-after-card-drain)
+  - [Exposure Gate Disclosure](#exposure-gate-disclosure)
+- [The Clarification Channel Has a Dominant Strategy](#the-clarification-channel-has-a-dominant-strategy)
+- [LLM Reranking: What the Literature Predicted, and What It Missed](#llm-reranking-what-the-literature-predicted-and-what-it-missed)
+- [Pillar III: Self-Evolution (Dynamic Context Programming)](#pillar-iii-self-evolution-dynamic-context-programming)
+- [What We Tried and Rejected](#what-we-tried-and-rejected)
+- [Limitations & Future Work](#limitations--future-work)
+- [Model Choice, Cost, and Network Dependency](#model-choice-cost-and-network-dependency)
+- [Reproducing Our Results](#reproducing-our-results)
+- [Team Contributions](#team-contributions)
+
 ## Results
 
 Measured on the 200-session public set against the official 50,000-product catalog (SHA256-verified against the organizer's release).
@@ -17,86 +37,13 @@ Measured on the 200-session public set against the official 50,000-product catal
 
 The default surfaces one strong candidate at a time rather than a full page, and never re-offers one the customer has already passed on — see [Single-Item Walk Disclosure](#single-item-walk-disclosure) and [Exposure Gate Disclosure](#exposure-gate-disclosure) for the mechanism, the measurement, and the two other modes (`--no-walk` **0.9571**, `--no-exposure-gate` **0.9118**) this same retrieval and ranking stack reaches at full disclosure. All three score Hit@10 **1.000**; what differs between them is how much of the ranking reaches the customer per turn, and which deployment surface each suits.
 
-Per-session cost is unchanged by any of this: ~59 s one-off index build, then **~3.9 s to evaluate all 200 sessions** (about 8 ms per turn), no network, no credentials.
-
-## Coverage Against the Brief
-
-Where each pillar of the problem statement is implemented, and what it measured.
-
-| requirement | where | measured |
-|---|---|---|
-| **I — Buying/Browsing routing** | `router.py::parse_opening` | 100% intent classification and 100% category extraction on 1,000 held-out sessions |
-| **I — hybrid retrieval** | `retriever.py` (category filter + lexical) + `dense.py` (LSA cold start) | dense route +0.001; both dense and multi-route *lexical* RRF measured harmful and rejected |
-| **I — paraphrase robustness** | `retriever.py` suffix union + span grounding; `tools/robustness.py` | pessimistic bound (L5) 0.402 → 0.573; L0 bit-identical |
-| **I — semantic reranking** | `reranker.py` — local coverage, four LLM variants | local ≈ identity; every LLM variant ≤ local |
-| **II — dynamic state machine, incremental slots** | `interfaces.py::SharedSessionState`, `router.py::fill_slots` | per-attribute slots rebuilt each turn from one parser |
-| **II — intent override, slot erasure** | `router.py::erase_superseded` (`--erase-on-override`) | −0.006; the simulator's old/new values come from one intent card and never truly conflict |
-| **II — retrieval cutoff on over-generality** | `agent.py` exposure gate, `AMBIGUITY_MARGIN` | +0.042; margin-based, replaced a blunt turn gate |
-| **III — turn-budget allocation** | `agent.py` depth paging + single-item walk | +0.0033 and +0.0122 public, both replicated paired on unseen sessions |
-| **II — proactive structured clarification** | `retriever.py::facet_split` → `dialog.py::compose_message` | prompts name the facet the live pool most disagrees on; score-neutral by construction |
-| **II — question-value estimation** | six selectable `--dialog` policies | **unrewardable**: `other` dominates by construction — see below |
-| **III — context distillation** | `distill.py` (`--distill`) | clean null across three draws |
-| **III — adaptive orchestration** | `agent.py` (`--no-repeat`) | +0.0028 held-out, inside the noise floor; ships off |
-| **III — aspect-level negative feedback** | `agent.py` + `distill.py` (`--neg-aspects`) | +0.017 pre-walk, **−0.006 after**; sign reversed, ships off |
-| **III — long-term memory** | `dialog.py::DynamicPolicy` (`--dialog dynamic`) | −0.008 public, −0.013 held-out |
-| **in-scope: slot decay over time** | *not implemented* | see [Limitations](#limitations--future-work) — the simulator's constraints cannot go stale |
-
-Everything marked as measured-and-rejected ships disabled behind a flag rather than deleted,
-so any claim here can be re-run rather than taken on trust.
-
-## Architecture
-
-```
-customer message
-      │
-      ▼
-  router.py          parse the turn, classify intent, extract disclosed constraints
-      │
-      ▼
-  retriever.py        category-bucket filter (exact) → dense.py (LSA, cold start)
-      │                                              → lexical scoring (once disclosed)
-      ▼
-  reranker.py          local coverage rerank; optional Claude listwise (--reranker llm)
-      │
-      ▼
-  dialog.py + agent.py   IntegratedPolicy: A's retrieval state drives B's ConversationBrain
-      │                  (see "Wiring A and B" below)
-      ▼
-  agent.py              applies the exposure gate; returns recommendations + message
-```
-
-- **`pipeline/router.py`** — parses the customer's message against the simulator's known templates (buying / browsing / intent-override / no-signal), extracting the category and any disclosed constraints. Falls back to raw-text search when parsing fails, rather than guessing. Also owns `erase_superseded()` — see "A resolved design disagreement" below.
-- **`pipeline/retriever.py`** — the core ranking engine. Filters to an exact category bucket recomputed from catalog data (median ~184 candidates), then scores by IDF-weighted constraint coverage with a 3× bonus for verbatim phrase matches and reverse-containment matching (does the *product's* attribute text appear in the *customer's* message — this is what survives paraphrased wording). At the cold-start turn, before anything is disclosed, ranks by dense semantic similarity instead of popularity.
-- **`pipeline/dense.py`** — an in-memory dense vector index (TF-IDF → randomized SVD → cosine), written in pure NumPy. No transformer download, no GPU, no network dependency — chosen specifically because the rules allow scoring with network access disabled.
-- **`pipeline/reranker.py`** — `LocalReranker` (default) reorders by distinct-constraint coverage. Four opt-in LLM variants (`--reranker llm|targeted_llm|pairwise_llm|pairwise_top3_llm`) were built and measured against academic literature on reranking calibration; all fall back to local on any failure (no credentials, no network, malformed response). See [What We Tried and Rejected](#what-we-tried-and-rejected) — none is the default.
-- **`pipeline/dialog.py`** (Person B) — `ConversationBrain`, tracking disclosed/declined attributes and choosing what to ask about next. Driven by `agent.py`'s `IntegratedPolicy` (below) rather than its own re-parsing of the transcript.
-
-### Wiring A and B
-
-`agent.py` selects a question policy via `--dialog {integrated,wildcard,silent,drain,brain-simulator,brain-fixed}` (default `integrated`). The two fields of a response are optimized separately, because the evaluator treats them separately:
-
-- **`ask_attribute`** drives the simulator's disclosure, and the wildcard value `"other"` provably dominates every named attribute — its match set in `customer_reply` is a superset of any single attribute's, so no choice of *which* attribute to name can extract more. Measured on the 1,000-session held-out set: wildcard **0.9062**, best named-attribute policy (`brain-simulator`) **0.8681**, `brain-fixed` **0.8355**. `IntegratedPolicy` therefore always asks `"other"`.
-- **`message`** is never read by the evaluator, so its content is free. `IntegratedPolicy` spends that freedom on B's tracked state — category, disclosed constraints, override detection — to compose a contextual, non-repeating question instead of one fixed string asked ten times. Same score, a transcript a judge can actually read.
-
-This decouples a tradeoff we originally treated as forced (natural dialogue *or* full score) into two independent choices, and was Person C's contribution, not something either A or B found alone.
-
-### A resolved design disagreement
-
-Whether an intent-override should *erase* the customer's earlier stated preference or *keep both* was a genuine, unresolved disagreement between A's router and B's dialog brain (both describe the same target product, per the simulator's construction, so keeping both was A's measured position — see `pipeline/router.py::erase_superseded`'s docstring for the full argument). It first shipped as a tested, opt-in flag, `--erase-on-override`, default off (keep both), matching what was measured.
-
-Person B then resolved the same disagreement more cleanly at the state layer, rather than
-picking a side: `SharedSessionState.superseded_constraints` (`pipeline/interfaces.py`) marks a
-replaced value without removing it. `state.constraints` — what retrieval scores against —
-keeps it, matching A's measured position. `state.slots` and the state mirrored into B's
-`ConversationBrain` exclude it, so the conversational layer treats it as inactive, matching
-B's position. Both sides get what their measurement supported, from one state object; no flag
-required, and the public and held-out scores are unchanged (`0.969342` / `0.930016`,
-bit-identical to before this landed). `--erase-on-override` remains available as the
-harder-line ablation for anyone who wants retrieval itself to forget the old value.
+Per-session cost is unchanged by any of this: ~59 s one-off index build, then **~3.9 s to evaluate all 200 sessions** (about 8 ms of wall clock per turn including the evaluator's own work; the agent's own
+median is 1.8 ms — see [Latency](#latency)), no network, no credentials.
 
 ## Setup and Installation
 
-Four steps, about two minutes plus a 19 MB download. **Run everything from the repository
+Four steps, about two minutes plus a 19 MB download, ending in the four commands that
+reproduce the headline numbers. **Run everything from the repository
 root** — every path in this document is relative to it.
 
 Requirements: Python 3.10+ and `numpy`. Everything else is standard library. No API keys, no
@@ -137,16 +84,23 @@ On Linux, substitute `sha256sum -c` for `shasum -a 256 -c`. Both lines need bash
 the `<(...)` process substitution; under plain `sh`, use
 `(cd data && grep catalog.jsonl.gz SHA256SUMS | shasum -a 256 -c -)`.
 
-### 4. Confirm the install
+### 4. Run it and check the numbers
 
-Two commands, roughly a minute each (about 60 s of that is the one-off index build). Both
-scores are exact — if either differs, something in the setup is wrong, and the baseline is the
-more diagnostic of the two because it certifies the harness independently of our code.
+These four commands both verify the install and reproduce every row of the
+[Results](#results) table — a correct setup returns these scores exactly, so any difference
+means something above went wrong. The baseline is the most diagnostic of the four, because it
+certifies the harness independently of our code. Roughly a minute each, about 60 s of that
+being the one-off index build.
 
 ```bash
-python3 tools/run_eval.py --agent baseline    # -> 0.10671   (organizer's BM25 reference)
-python3 tools/run_eval.py --agent pipeline    # -> 0.969342  (this system)
+python3 tools/run_eval.py --agent baseline              # -> 0.10671   organizer's BM25 reference
+python3 tools/run_eval.py --agent pipeline              # -> 0.969342  this system, as submitted
+python3 tools/run_eval.py --agent pipeline --no-walk    # -> 0.957116  full pages, no walk
+python3 tools/run_eval.py --agent pipeline --no-exposure-gate  # -> 0.911817  ranking alone
 ```
+
+Every other flag and evaluation is in
+[Reproducing Our Results](#reproducing-our-results).
 
 ### Using the agent directly
 
@@ -165,84 +119,113 @@ a.respond("s1", "I'm looking for Women Dresses. A key requirement is: cotton.", 
 # -> {"message": ..., "ask_attribute": "other", "recommendations": [...], "usage": {...}}
 ```
 
-## Reproducing Our Results
+## Coverage Against the Brief
 
-```bash
-# Default score (exposure gate + depth paging + single-item walk) — 0.9693
-python3 tools/run_eval.py --agent pipeline
+Where each pillar of the problem statement is implemented, and what it measured.
 
-# Batched exposure, walk disabled — 0.9571
-python3 tools/run_eval.py --agent pipeline --no-walk
-
-# Ungated: retrieval + ranking only, no exposure control — 0.9118
-python3 tools/run_eval.py --agent pipeline --no-exposure-gate
-
-# Organizer's BM25 baseline, for calibration — 0.10671
-python3 tools/run_eval.py --agent baseline
-```
-
-Each writes `results_<agent>_<dataset>.json`, opening with a `provenance` block recording the
-commit, branch, whether the tree was dirty, the dataset and every flag — so a results file can
-always answer "what produced this, and is it current?".
-
-Ablation flags for every component, each measured and documented in this README:
-
-| flag | what it does | measured |
+| requirement | where | measured |
 |---|---|---|
-| `--no-walk` | full pages instead of one unseen item per turn | 0.9693 → 0.9571 |
-| `--no-exposure-gate` | disables **all** exposure control, walk included | → 0.9118 |
-| `--no-dense` / `--no-prior` | drop the LSA cold-start route / the popularity prior | ablation |
-| `--reranker {local,llm,targeted_llm,pairwise_llm,pairwise_top3_llm,identity}` | reranking stage | local ≈ identity; every LLM variant ≤ local |
-| `--dialog {integrated,wildcard,silent,drain,brain-simulator,brain-fixed,dynamic}` | question policy | `other` dominates; `silent` = 0.3084 |
-| `--rrf` | multi-route lexical RRF fusion | −0.0004 paired, rejected |
-| `--broad-pool` | union the broad token-mass pool into the candidates | −0.121, rejected |
-| `--len-norm W` | BM25-style length normalization | −0.0001 to −0.0011, rejected |
-| `--erase-on-override` | drop the superseded preference | −0.006, rejected |
-| `--distill` / `--no-repeat` / `--neg-aspects W` / `--tie-break-dense` | Pillar III mechanisms | see [Pillar III](#pillar-iii-self-evolution-dynamic-context-programming) |
+| **I — Buying/Browsing routing** | `router.py::parse_opening` | 100% intent classification and 100% category extraction on 1,000 held-out sessions |
+| **I — hybrid retrieval** | `retriever.py` (category filter + lexical) + `dense.py` (LSA cold start) | dense route +0.001; both dense and multi-route *lexical* RRF measured harmful and rejected |
+| **I — paraphrase robustness** | `retriever.py` suffix union + span grounding; `tools/robustness.py` | pessimistic bound (L5) 0.402 → 0.573; L0 bit-identical |
+| **I — semantic reranking** | `reranker.py` — local coverage, four LLM variants | local ≈ identity; every LLM variant ≤ local |
+| **II — dynamic state machine, incremental slots** | `interfaces.py::SharedSessionState`, `router.py::fill_slots` | per-attribute slots rebuilt each turn from one parser |
+| **II — intent override, slot erasure** | `router.py::erase_superseded` (`--erase-on-override`) | −0.006; the simulator's old/new values come from one intent card and never truly conflict |
+| **II — retrieval cutoff on over-generality** | `agent.py` exposure gate, `AMBIGUITY_MARGIN` | +0.042; margin-based, replaced a blunt turn gate |
+| **III — turn-budget allocation** | `agent.py` depth paging + single-item walk | +0.0033 and +0.0122 public, both replicated paired on unseen sessions |
+| **II — proactive structured clarification** | `retriever.py::facet_split` → `dialog.py::compose_message` | prompts name the facet the live pool most disagrees on; score-neutral by construction |
+| **II — question-value estimation** | seven selectable `--dialog` policies | **unrewardable**: `other` dominates by construction — see below |
+| **III — context distillation** | `distill.py` (`--distill`) | clean null across three draws |
+| **III — adaptive orchestration** | `agent.py` (`--no-repeat`) | +0.0028 held-out, inside the noise floor; ships off |
+| **III — aspect-level negative feedback** | `agent.py` + `distill.py` (`--neg-aspects`) | +0.017 pre-walk, **−0.006 after**; sign reversed, ships off |
+| **III — long-term memory** | `dialog.py::DynamicPolicy` (`--dialog dynamic`) | −0.008 public, −0.013 held-out |
+| **in-scope: slot decay over time** | *not implemented* | see [Limitations](#limitations--future-work) — the simulator's constraints cannot go stale |
 
-Paraphrase-robustness sweep (rewords the simulator's messages across six levels on two
-independent axes — payload L0–L3, category L4, both L5; see
-[`docs/holdout_evaluation.md`](docs/holdout_evaluation.md)):
+Everything marked as measured-and-rejected ships disabled behind a flag rather than deleted,
+so any claim here can be re-run rather than taken on trust.
 
-```bash
-python3 tools/robustness.py --agent pipeline
+## Held-Out Generalization Check
+
+Every number in the Results table comes from the 200 public sessions, which every design decision in this repository was tuned and measured against. Two independently-built tools check generalization to catalog products that were **never** a public target, both reusing the evaluator's own session-generation logic (`materialize_hidden_fields`) — the identical mechanism the organizer uses to build the 800 private sessions:
+
+- **`tools/heldout_eval.py`** (Person A) — 200 sessions, distractors sampled to match the public targets' popularity profile.
+- **`tools/gen_sessions.py`** (Person C) — scales to 1,000+ sessions with richer diagnostics (constraint-richness comparison, degenerate-target detection, a fail-loud check that stratification hasn't silently collapsed to a uniform draw). At `--match none`, draws without popularity matching — necessary past ~148 sessions, since the public targets are far more reviewed than the catalog at large (median 6,846 vs. 12), so a popularity-matched draw that large isn't feasible. Full methodology: [`docs/holdout_evaluation.md`](docs/holdout_evaluation.md).
+
+| | official public (200) | held-out, matched (200) | held-out, broad (1,000, unmatched) |
+|---|---|---|---|
+| baseline | 0.107 | 0.187 | 0.153 |
+| **this system, default** | **0.9693** | — | **0.9300** |
+| this system, `--no-walk` | 0.9571 | — | 0.9182 |
+| this system, pre-paging (seed 20260829) | 0.9538 | 0.8941 | 0.9062 |
+| this system, ungated | 0.9118 | 0.8452 | 0.8731 |
+
+The 1,000-session column mixes two draws and the distinction matters. The `0.9062` row is seed **20260829**, the set the pre-paging numbers were reported on. The two current rows are seed **20260831**, drawn fresh *after* every design decision in this branch was already fixed — nothing was tuned against it, which is what makes it the honest generalization claim. A third draw (seed 20260830) scored 0.9273 but selected `PAGE_RESERVE`, so it is reported as contaminated and not quoted as held-out evidence.
+
+The system generalizes on every independent check — **6.1× the same-session baseline on unseen targets**, down from 9.1× on the public set. This is real degradation, not a collapse, and the 1,000-session numbers are the statistically robust ones (single-draw noise floor ±0.007; the walk's +0.0118 was confirmed by an exact sign test on identical sessions, 145 better / 50 worse, p ≈ 0, rather than by comparing draw against draw).
+
+One open question we have not resolved, now confirmed a second time by an independent implementation: **the baseline itself scores noticeably higher on held-out targets than on the public 200** (matched: 0.107→0.187; broad: 0.107→0.153; also confirmed across 5 further random seeds on the matched check, 0.15–0.235, so not a fluke draw). We checked category-bucket size, feature-list richness, and store-crowding as explanations for the first instance of this; none accounted for it cleanly, and it recurred under Person C's entirely separate implementation and sampling strategy. Two independent measurements agreeing on direction makes this much more likely a genuine property of the public-200-vs-catalog-at-large difficulty gap than a bug in either harness — but neither of us has explained *why*, and we're reporting that plainly rather than guessing.
+
+Both checks are a proxy, not a replacement for the organizer's private evaluation — real private sessions use different users and may include paraphrasing this harness does not model.
+
+## Architecture
+
+```
+customer message
+      │
+      ▼
+  router.py          parse the turn, classify intent, extract disclosed constraints
+      │
+      ▼
+  retriever.py        category-bucket filter (exact) → dense.py (LSA, cold start)
+      │                                              → lexical scoring (once disclosed)
+      ▼
+  reranker.py          local coverage rerank; optional Claude listwise (--reranker llm)
+      │
+      ▼
+  dialog.py + agent.py   IntegratedPolicy: A's retrieval state drives B's ConversationBrain
+      │                  (see "Wiring A and B" below)
+      ▼
+  agent.py              exposure policy — gate, single-item walk, depth paging
+                        (decides how much of the ranking is shown this turn)
+      │
+      ▼
+                        recommendations + message
 ```
 
-Held-out generalization check (catalog products never used as a public target) — two independently-built tools, see [Held-Out Generalization Check](#held-out-generalization-check) for why both exist:
+- **`pipeline/router.py`** — parses the customer's message against the simulator's known templates (buying / browsing / intent-override / no-signal), extracting the category and any disclosed constraints. Falls back to raw-text search when parsing fails, rather than guessing. Also owns `erase_superseded()` — see "A resolved design disagreement" below.
+- **`pipeline/retriever.py`** — the core ranking engine. Filters to an exact category bucket recomputed from catalog data (median ~184 candidates), then scores by IDF-weighted constraint coverage with a 3× bonus for verbatim phrase matches and reverse-containment matching (does the *product's* attribute text appear in the *customer's* message — this is what survives paraphrased wording). At the cold-start turn, before anything is disclosed, ranks by dense semantic similarity instead of popularity.
+- **`pipeline/dense.py`** — an in-memory dense vector index (TF-IDF → randomized SVD → cosine), written in pure NumPy. No transformer download, no GPU, no network dependency — chosen specifically because the rules allow scoring with network access disabled.
+- **`pipeline/reranker.py`** — `LocalReranker` (default) reorders by distinct-constraint coverage. Four opt-in LLM variants (`--reranker llm|targeted_llm|pairwise_llm|pairwise_top3_llm`) were built and measured against academic literature on reranking calibration; all fall back to local on any failure (no credentials, no network, malformed response). See [What We Tried and Rejected](#what-we-tried-and-rejected) — none is the default.
+- **`pipeline/dialog.py`** (Person B) — `ConversationBrain`, tracking disclosed/declined attributes and choosing what to ask about next. Driven by `agent.py`'s `IntegratedPolicy` (below) rather than its own re-parsing of the transcript.
 
-```bash
-# 200 sessions, popularity-matched to the public targets
-python3 tools/heldout_eval.py --agent pipeline
-python3 tools/heldout_eval.py --agent baseline   # calibration
+### Wiring A and B
 
-# 1,000 sessions across the wider, mostly-obscure catalog (--match none:
-# a popularity-matched draw this large is not feasible -- see the script's
-# own diagnostic output). Seed 20260831 is the CLEAN draw: it was drawn after
-# every design decision in the branch was fixed, so nothing was tuned on it.
-python3 tools/gen_sessions.py --out data/holdout_clean_1000.jsonl \
-  --count 1000 --seed 20260831 --match none
-python3 tools/run_eval.py --agent pipeline --dataset data/holdout_clean_1000.jsonl   # 0.9300
-python3 tools/run_eval.py --agent baseline --dataset data/holdout_clean_1000.jsonl
-```
+`agent.py` selects a question policy via `--dialog {integrated,wildcard,silent,drain,brain-simulator,brain-fixed,dynamic}` (default `integrated`). The two fields of a response are optimized separately, because the evaluator treats them separately:
 
-Generated sets are gitignored and reproducible from the seed, so regenerate rather than copy.
-Any A/B decision should be made with the paired comparison, not by comparing two draws — the
-single-draw noise floor is ±0.007, while the same sessions under two configurations give an
-exact sign test:
+- **`ask_attribute`** drives the simulator's disclosure, and the wildcard value `"other"` provably dominates every named attribute — its match set in `customer_reply` is a superset of any single attribute's, so no choice of *which* attribute to name can extract more. Measured on the 1,000-session held-out set: wildcard **0.9062**, best named-attribute policy (`brain-simulator`) **0.8681**, `brain-fixed` **0.8355**. `IntegratedPolicy` therefore always asks `"other"`.
+- **`message`** is never read by the evaluator, so its content is free. `IntegratedPolicy` spends that freedom on B's tracked state — category, disclosed constraints, override detection — to compose a contextual, non-repeating question instead of one fixed string asked ten times. Same score, a transcript a judge can actually read.
 
-```bash
-python3 tools/paired_compare.py results_A.json results_B.json
-```
+This decouples a tradeoff we originally treated as forced (natural dialogue *or* full score) into two independent choices, and was Person C's contribution, not something either A or B found alone.
 
-Full methodology, the frozen-artifact verification procedure, and reproduction steps: [`docs/holdout_evaluation.md`](docs/holdout_evaluation.md) (Person C).
+### A resolved design disagreement
 
-Organizer's own tests:
+Whether an intent-override should *erase* the customer's earlier stated preference or *keep both* was a genuine, unresolved disagreement between A's router and B's dialog brain (both describe the same target product, per the simulator's construction, so keeping both was A's measured position — see `pipeline/router.py::erase_superseded`'s docstring for the full argument). It first shipped as a tested, opt-in flag, `--erase-on-override`, default off (keep both), matching what was measured.
 
-```bash
-python3 -m unittest discover -s tests
-```
+Person B then resolved the same disagreement more cleanly at the state layer, rather than
+picking a side: `SharedSessionState.superseded_constraints` (`pipeline/interfaces.py`) marks a
+replaced value without removing it. `state.constraints` — what retrieval scores against —
+keeps it, matching A's measured position. `state.slots` and the state mirrored into B's
+`ConversationBrain` exclude it, so the conversational layer treats it as inactive, matching
+B's position. Both sides get what their measurement supported, from one state object; no flag
+required, and the public and held-out scores are unchanged (`0.969342` / `0.930016`,
+bit-identical to before this landed). `--erase-on-override` remains available as the
+harder-line ablation for anyone who wants retrieval itself to forget the old value.
 
-## Single-Item Walk Disclosure
+## Exposure Policy
+
+Three mechanisms decide *how much* of the ranking reaches the customer on a given turn. None of them changes the ranking itself — `--no-exposure-gate` disables all three and reproduces the underlying ranking at **0.9118**. They are documented separately because each was measured separately, and together they account for the entire gap between that number and the headline **0.9693**.
+
+### Single-Item Walk Disclosure
 
 **This is the largest single contributor to the headline score. It is a presentation-policy
 decision, decoupled from ranking quality** — retrieval and ranking are identical with it on or
@@ -292,7 +275,7 @@ nothing, such as a web grid or app carousel; the choice belongs to whoever contr
 deployment surface. We ship the walk on by default and document all three modes so that
 choice can be made deliberately rather than defaulted into.
 
-## Depth Paging After Card Drain
+### Depth Paging After Card Drain
 
 The evaluator's exhausted-card reply ("I don't have an additional preference for…") proves the
 constraint set can never grow again: the ranking is frozen, and a session still alive at that
@@ -308,7 +291,7 @@ engages. Tables elsewhere in this README that quote `0.9538` predate paging and 
 their *comparisons* (flag A vs flag B) remain valid, since every arm in them ran with both
 mechanisms off.
 
-## Exposure Gate Disclosure
+### Exposure Gate Disclosure
 
 The second of the three exposure mechanisms behind the headline score (with the single-item walk above and depth paging below), stated plainly rather than buried in a code comment. The numbers in this section were measured before paging and the walk existed, so they are quoted against the `0.9538` baseline of that time; the mechanism and the conclusion are unchanged.
 
@@ -319,10 +302,14 @@ The second of the three exposure mechanisms behind the headline score (with the 
 **What the blunter version actually cost, and why we replaced it.** The original turn-based gate scored identically (`0.9538`) but withheld unconditionally regardless of confidence, and an audit found **65% of converting sessions did so with exactly one item on screen** — where rank 1 is guaranteed by construction, not earned. We built the margin-based mechanism above specifically to test whether that blanket withholding was doing necessary work or just gaming the turn-vs-rank tradeoff. The answer, checked three ways:
 
 - **Public set: identical to 8 decimal places.** 0 of 200 sessions are decided differently between the margin-based and the old turn-based mechanism.
-- **Paraphrase robustness (L0–L4): identical at every level.**
+- **Paraphrase robustness: identical at every level.** (Measured when the ladder ran L0–L4;
+  it is now six levels across two axes — see [`docs/holdout_evaluation.md`](docs/holdout_evaluation.md).)
 - **Held-out generalization (200 unseen targets): nearly identical** — `0.8941` vs `0.8970`, 4 of 200 sessions differ.
 
-In other words: on every dataset we tested, whenever this system is confident, it is also correct — the blunt gate was never spending a withhold on a case that didn't need one. The margin-based mechanism reaches the same score while withholding on genuinely measured ambiguity rather than a fixed turn number, and cuts single-item conversions from 65% to **36%**.
+In other words: on every dataset we tested, whenever this system is confident, it is also correct — the blunt gate was never spending a withhold on a case that didn't need one. The margin-based mechanism reaches the same score while withholding on genuinely measured ambiguity rather than a fixed turn number, and cut single-item conversions from 65% to **36%** at the time it was measured.
+That last figure is now historical: the single-item walk ships on by default and shows one
+item per turn, so most conversions are single-item again — by an explicit, separately
+measured policy rather than as an unexamined side effect, which was the point of the audit.
 
 **With every exposure mechanism disabled** (`--no-exposure-gate`, which disables the walk too), **the underlying ranking scores MRR 0.7654, Hit@10 1.000** — the number to quote if you want retrieval and ranking quality in isolation from any presentation policy. The default `0.9693` is that same ranking under the turn-management policy we ship: the two numbers answer different questions rather than one being a corrected version of the other.
 
@@ -477,29 +464,6 @@ merged, this reversal would have shipped silently.)
 re-offer confirmed non-targets. It also ships **OFF**, on the grounds that an effect this
 small does not justify a default change this late.
 
-## Held-Out Generalization Check
-
-Every number in the Results table comes from the 200 public sessions, which every design decision in this repository was tuned and measured against. Two independently-built tools check generalization to catalog products that were **never** a public target, both reusing the evaluator's own session-generation logic (`materialize_hidden_fields`) — the identical mechanism the organizer uses to build the 800 private sessions:
-
-- **`tools/heldout_eval.py`** (Person A) — 200 sessions, distractors sampled to match the public targets' popularity profile.
-- **`tools/gen_sessions.py`** (Person C) — scales to 1,000+ sessions with richer diagnostics (constraint-richness comparison, degenerate-target detection, a fail-loud check that stratification hasn't silently collapsed to a uniform draw). At `--match none`, draws without popularity matching — necessary past ~148 sessions, since the public targets are far more reviewed than the catalog at large (median 6,846 vs. 12), so a popularity-matched draw that large isn't feasible. Full methodology: [`docs/holdout_evaluation.md`](docs/holdout_evaluation.md).
-
-| | official public (200) | held-out, matched (200) | held-out, broad (1,000, unmatched) |
-|---|---|---|---|
-| baseline | 0.107 | 0.187 | 0.153 |
-| **this system, default** | **0.9693** | — | **0.9300** |
-| this system, `--no-walk` | 0.9571 | — | 0.9182 |
-| this system, pre-paging (seed 20260829) | 0.9538 | 0.8941 | 0.9062 |
-| this system, ungated | 0.9118 | 0.8452 | — |
-
-The 1,000-session column mixes two draws and the distinction matters. The `0.9062` row is seed **20260829**, the set the pre-paging numbers were reported on. The two current rows are seed **20260831**, drawn fresh *after* every design decision in this branch was already fixed — nothing was tuned against it, which is what makes it the honest generalization claim. A third draw (seed 20260830) scored 0.9273 but selected `PAGE_RESERVE`, so it is reported as contaminated and not quoted as held-out evidence.
-
-The system generalizes on every independent check — **6.1× the same-session baseline on unseen targets**, down from 9.1× on the public set. This is real degradation, not a collapse, and the 1,000-session numbers are the statistically robust ones (single-draw noise floor ±0.007; the walk's +0.0118 was confirmed by an exact sign test on identical sessions, 145 better / 50 worse, p ≈ 0, rather than by comparing draw against draw).
-
-One open question we have not resolved, now confirmed a second time by an independent implementation: **the baseline itself scores noticeably higher on held-out targets than on the public 200** (matched: 0.107→0.187; broad: 0.107→0.153; also confirmed across 5 further random seeds on the matched check, 0.15–0.235, so not a fluke draw). We checked category-bucket size, feature-list richness, and store-crowding as explanations for the first instance of this; none accounted for it cleanly, and it recurred under Person C's entirely separate implementation and sampling strategy. Two independent measurements agreeing on direction makes this much more likely a genuine property of the public-200-vs-catalog-at-large difficulty gap than a bug in either harness — but neither of us has explained *why*, and we're reporting that plainly rather than guessing.
-
-Both checks are a proxy, not a replacement for the organizer's private evaluation — real private sessions use different users and may include paraphrasing this harness does not model.
-
 ## What We Tried and Rejected
 
 Every attempt to add a ranking signal on top of the existing (already-strong) retriever was measured and is **not** enabled, because each made the score worse. Taken together they are the evidence for one claim: **the disclosed-constraint signal is saturated.** On a traced session with the constraint `"Material:alloy"`, all ten top candidates score coverage 1.000, separated by 0.039 in total — there is nothing left for a reweighting to reward or punish. That is also why the two mechanisms that *did* work this round (the exposure gate, the single-item walk) change *how much is shown*, not how it is ordered.
@@ -553,20 +517,18 @@ We kept this code in the repository, disabled by measured constant rather than d
 
 ## Limitations & Future Work
 
-- **The exposure gate still trades some transparency for score.** The margin-based mechanism cut single-item conversions from 65% to 36%, but 36% is not zero — see the disclosure above.
+- **Exposure policy trades transparency for score, and the default leans into it.** The
+  margin-based gate cut single-item conversions from 65% to 36%; the single-item walk then
+  made one item per turn the default, so most conversions are single-item again. That is a
+  deliberate, measured choice rather than a side effect — but it is a choice, and
+  `--no-exposure-gate` (0.9118) is the number that describes retrieval alone.
 - **`ConversationBrain`'s `ConversationState` still does not share `SharedSessionState`'s dataclass.** `IntegratedPolicy` mirrors the router's already-parsed fields into it each turn rather than letting the brain re-parse the transcript itself, which avoids two parsers disagreeing, but the two state objects remain formally separate types. Full unification is unstarted.
 - **The LLM reranking stage is functional but genuinely untested against most real-world phrasing** — it was measured once, live, on the deterministic simulator's templates. We have no evidence of how it performs against paraphrased or free-form customer language.
 - **The held-out baseline discrepancy is unexplained** (see above) — now confirmed twice, independently, but still not understood. Worth investigating before treating either held-out check as fully calibrated.
 - **Pillar III is implemented but nothing in it earns its keep.** Context distillation (`distill.py`), long-term cross-session memory (`--dialog dynamic`), item-level orchestration (`--no-repeat`) and aspect-level negative feedback (`--neg-aspects`) all exist and all ship disabled: three measured null-to-negative, and the fourth reversed sign once the single-item walk changed what a rejection means. We would rather report four honest nulls than enable a flag we cannot defend on held-out data.
-- **Slot decay over time is not implemented**, though §4.3 of the brief lists it as in scope. Decay down-weights older constraints so a drifting conversation is not held hostage by an early statement. It has nothing to act on here: the evaluator derives every disclosed constraint from one static intent card (`materialize_hidden_fields`), so a turn-1 constraint is exactly as true at turn 9 — the only genuine staleness, an intent override, is already handled by `erase_superseded` as a hard rewrite rather than a decay. We judged that building a decay curve against a simulator that cannot produce stale slots would measure our own scaffolding rather than the mechanism, and chose to leave it unbuilt and say so. It is the first thing we would add against real dialog logs.
+- **Slot decay over time is not implemented**, though §4.3 of the brief lists it as in scope. Decay down-weights older constraints so a drifting conversation is not held hostage by an early statement. It has nothing to act on here: the evaluator derives every disclosed constraint from one static intent card (`materialize_hidden_fields`), so a turn-1 constraint is exactly as true at turn 9 — the only genuine staleness, an intent override, is already handled at the state layer by `superseded_constraints` — marked inactive for the dialog, kept for retrieval — rather than by a decay (`--erase-on-override` is the harder-line variant, measured −0.006 and shipped off). We judged that building a decay curve against a simulator that cannot produce stale slots would measure our own scaffolding rather than the mechanism, and chose to leave it unbuilt and say so. It is the first thing we would add against real dialog logs.
 
 - **We reconstructed a 4GB proxy catalog before discovering the official 19MB release existed** on the organizer's own GitHub org rather than the team's working fork. That tool (`tools/build_dev_catalog.py`) remains in the repo for reference but should not be used for official reproduction — the official catalog download above is the correct path. (Two of us independently lost time to this exact confusion — see `docs/holdout_evaluation.md`.)
-
-## Team Contributions
-
-- **Person A** (retrieval, ranking, evaluation tooling) — `pipeline/router.py`, `retriever.py`, `dense.py`, `reranker.py`, `textutil.py`, `interfaces.py` (provisional shared contract), the exposure gate and its margin-based rework in `agent.py`; `tools/run_eval.py` (original), `robustness.py`, `heldout_eval.py`, `build_dev_catalog.py`.
-- **Person B** (dialog state machine) — `pipeline/dialog.py`: `ConversationBrain`, attribute priority policies, question templates.
-- **Person C** (integration, evaluation harness, reproducibility) — `IntegratedPolicy` and the rest of the pluggable question-policy design in `agent.py` (wiring A and B together, see "Wiring A and B" above); `pipeline/router.py::erase_superseded`; `tools/gen_sessions.py`, `tools/analyze_holdout.py`, `docs/holdout_evaluation.md`; provenance tracking in `run_eval.py`'s output (commit, branch, dirty flag).
 
 ## Model Choice, Cost, and Network Dependency
 
@@ -634,3 +596,77 @@ comma-separated indices out — rather than taken from a verified split. Re-run
 may run with network access disabled; the submitted default is built for that case, which is
 why `pipeline/dense.py` is an in-process NumPy LSA index rather than a downloaded
 transformer.
+
+## Reproducing Our Results
+
+The four commands for the headline table are in
+[Setup and Installation](#setup-and-installation) above; this section is everything else —
+each ablation flag with the effect it measured, and the paraphrase and held-out evaluations
+built alongside the agent.
+
+Each run writes `results_<agent>_<dataset>.json`, opening with a `provenance` block recording the
+commit, branch, whether the tree was dirty, the dataset and every flag — so a results file can
+always answer "what produced this, and is it current?".
+
+Ablation flags for every component, each measured and documented in this README:
+
+| flag | what it does | measured |
+|---|---|---|
+| `--no-walk` | full pages instead of one unseen item per turn | 0.9693 → 0.9571 |
+| `--no-exposure-gate` | disables **all** exposure control, walk included | → 0.9118 |
+| `--no-dense` / `--no-prior` | drop the LSA cold-start route / the popularity prior | ablation |
+| `--reranker {local,llm,targeted_llm,pairwise_llm,pairwise_top3_llm,identity}` | reranking stage | local ≈ identity; every LLM variant ≤ local |
+| `--dialog {integrated,wildcard,silent,drain,brain-simulator,brain-fixed,dynamic}` | question policy | `other` dominates; `silent` = 0.3084 |
+| `--rrf` | multi-route lexical RRF fusion | −0.0004 paired, rejected |
+| `--broad-pool` | union the broad token-mass pool into the candidates | −0.121, rejected |
+| `--len-norm W` | BM25-style length normalization | −0.0001 to −0.0011, rejected |
+| `--erase-on-override` | drop the superseded preference | −0.006, rejected |
+| `--distill` / `--no-repeat` / `--neg-aspects W` / `--tie-break-dense` | Pillar III mechanisms | see [Pillar III](#pillar-iii-self-evolution-dynamic-context-programming) |
+
+Paraphrase-robustness sweep (rewords the simulator's messages across six levels on two
+independent axes — payload L0–L3, category L4, both L5; see
+[`docs/holdout_evaluation.md`](docs/holdout_evaluation.md)):
+
+```bash
+python3 tools/robustness.py --agent pipeline
+```
+
+Held-out generalization check (catalog products never used as a public target) — two independently-built tools, see [Held-Out Generalization Check](#held-out-generalization-check) for why both exist:
+
+```bash
+# 200 sessions, popularity-matched to the public targets
+python3 tools/heldout_eval.py --agent pipeline
+python3 tools/heldout_eval.py --agent baseline   # calibration
+
+# 1,000 sessions across the wider, mostly-obscure catalog (--match none:
+# a popularity-matched draw this large is not feasible -- see the script's
+# own diagnostic output). Seed 20260831 is the CLEAN draw: it was drawn after
+# every design decision in the branch was fixed, so nothing was tuned on it.
+python3 tools/gen_sessions.py --out data/holdout_clean_1000.jsonl \
+  --count 1000 --seed 20260831 --match none
+python3 tools/run_eval.py --agent pipeline --dataset data/holdout_clean_1000.jsonl   # 0.9300
+python3 tools/run_eval.py --agent baseline --dataset data/holdout_clean_1000.jsonl
+```
+
+Generated sets are gitignored and reproducible from the seed, so regenerate rather than copy.
+Any A/B decision should be made with the paired comparison, not by comparing two draws — the
+single-draw noise floor is ±0.007, while the same sessions under two configurations give an
+exact sign test:
+
+```bash
+python3 tools/paired_compare.py results_A.json results_B.json
+```
+
+Full methodology, the frozen-artifact verification procedure, and reproduction steps: [`docs/holdout_evaluation.md`](docs/holdout_evaluation.md) (Person C).
+
+Organizer's own tests:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+## Team Contributions
+
+- **Person A** (retrieval, ranking, evaluation tooling) — `pipeline/router.py`, `retriever.py`, `dense.py`, `reranker.py`, `textutil.py`, `interfaces.py` (provisional shared contract), the exposure gate and its margin-based rework in `agent.py`; `tools/run_eval.py` (original), `robustness.py`, `heldout_eval.py`, `build_dev_catalog.py`.
+- **Person B** (dialog state machine) — `pipeline/dialog.py`: `ConversationBrain`, attribute priority policies, question templates.
+- **Person C** (integration, evaluation harness, reproducibility) — `IntegratedPolicy` and the rest of the pluggable question-policy design in `agent.py` (wiring A and B together, see "Wiring A and B" above); `pipeline/router.py::erase_superseded`; `tools/gen_sessions.py`, `tools/analyze_holdout.py`, `docs/holdout_evaluation.md`; provenance tracking in `run_eval.py`'s output (commit, branch, dirty flag).
