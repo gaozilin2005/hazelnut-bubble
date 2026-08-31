@@ -99,6 +99,23 @@ def main() -> None:
     parser.add_argument("--public-dataset", default="data/public_set.jsonl")
     parser.add_argument("--count", type=int, default=200)
     parser.add_argument("--seed", type=int, default=20260829)
+    parser.add_argument(
+        "--no-repeat",
+        action="store_true",
+        help="demote candidates already shown and rejected",
+    )
+
+    parser.add_argument(
+        "--no-walk",
+        action="store_true",
+        help="disable single-item walking",
+    )
+
+    parser.add_argument(
+        "--no-exposure-gate",
+        action="store_true",
+        help="disable exposure control",
+    )
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
@@ -112,7 +129,12 @@ def main() -> None:
 
     if args.agent == "pipeline":
         from pipeline.agent import PipelineAgent
-        agent = PipelineAgent(args.catalog)
+        agent = PipelineAgent(
+            args.catalog,
+            no_repeat=args.no_repeat,
+            walk=not args.no_walk,
+            exposure_gate=not args.no_exposure_gate,
+        )
     else:
         from starter.agent import Agent
         agent = Agent(args.catalog)

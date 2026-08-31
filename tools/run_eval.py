@@ -28,7 +28,7 @@ def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool 
                no_repeat: bool = False, neg_aspects: float = 0.0,
                tie_break_dense: bool = False, multi_route: bool = False,
                broad_pool: bool = False, len_norm: float = 0.0,
-               walk: bool = True):
+               walk: bool = True, rerank_pool: int = 10):
     if name == "pipeline":
         # Import the SUBMISSION entry point, not PipelineAgent directly, so every
         # number this tool reports is measured through the same class the
@@ -41,7 +41,7 @@ def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool 
                              erase_on_override=erase_on_override, distill=distill,
                              no_repeat=no_repeat, neg_aspects=neg_aspects,
                              tie_break_dense=tie_break_dense, multi_route=multi_route,
-                             broad_pool=broad_pool, len_norm=len_norm, walk=walk)
+                             broad_pool=broad_pool, len_norm=len_norm, walk=walk, rerank_pool=rerank_pool)
     from starter.agent import Agent
     return Agent(catalog)
 
@@ -135,6 +135,11 @@ def main() -> None:
                         help="reorder only the band of candidates within "
                              "TIE_BREAK_MARGIN of the rank-k cutoff by dense "
                              "similarity; off by default, see README")
+    parser.add_argument(
+        "--rerank-pool",
+        type=int,
+        default=10,
+        help="number of retrieved candidates passed to the reranker",)
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
@@ -152,7 +157,7 @@ def main() -> None:
                        neg_aspects=args.neg_aspects,
                        tie_break_dense=args.tie_break_dense, multi_route=args.rrf,
                        broad_pool=args.broad_pool, len_norm=args.len_norm,
-                       walk=not args.no_walk)
+                       walk=not args.no_walk, rerank_pool=args.rerank_pool,)
     built = time.perf_counter()
     result = evaluate(agent, samples, catalog_ids, categories, products)
     finished = time.perf_counter()
@@ -180,6 +185,7 @@ def main() -> None:
             "use_dense": not args.no_dense,
             "limit": args.limit or None,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "rerank_pool": args.rerank_pool,
         },
         **result,
     }
@@ -204,6 +210,7 @@ def main() -> None:
     # Any flag that changes the score must change the filename, or one run
     # silently overwrites another. This one was missed once already.
     suffix += "_ungated" if args.no_exposure_gate else ""
+    suffix += f"_rp{args.rerank_pool}" if args.rerank_pool != 10 else ""
     output = Path(
         args.output or f"results_{args.agent}_{Path(args.dataset).stem}{suffix}.json"
     )
