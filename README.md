@@ -371,7 +371,7 @@ customer has already stated. Identical score, a transcript worth reading.
 
 ## LLM Reranking: What the Literature Predicted, and What It Missed
 
-Four LLM reranker variants, all live-tested on `claude-haiku-4-5` against the 200-session public set (identical retrieval and dialog throughout), all opt-in via `--reranker`, none the default:
+Four LLM reranker variants, all live-tested on `claude-opus-5` (the code default in `pipeline/reranker.py::RANKING_MODEL`; an earlier draft of this document mistakenly said Haiku 4.5 — corrected here and in the cost table below) against the 200-session public set (identical retrieval and dialog throughout), all opt-in via `--reranker`, none the default:
 
 | variant | Score | vs local | tokens | sessions demoted |
 |---|---|---|---|---|
@@ -600,19 +600,35 @@ build inflates past 900 s. Run evaluations one at a time.
 
 ### Token usage and cost
 
-| configuration | tokens | cost | latency impact |
+| configuration | tokens | cost (Opus 5: $5/$25 per MTok in/out) | latency impact |
 |---|---|---|---|
 | **default (`--reranker local`)** | **0** | **$0.00** | as above |
-| `--reranker llm` (blanket listwise) | 174,221 | ~$0.29 | network round-trip per turn |
-| `--reranker targeted_llm` (top-12) | 99,380 | ~$0.17 | as above |
-| `--reranker pairwise_llm` (top-2) | 68,152 | ~$0.12 | as above |
-| `--reranker pairwise_top3_llm` | 133,453 | ~$0.22 | as above |
+| `--reranker llm` (blanket listwise) | 174,221 | ~$1.26† | network round-trip per turn |
+| `--reranker targeted_llm` (top-12) | 99,380 (88,223 in / 11,157 out) | ~$0.72 | as above |
+| `--reranker pairwise_llm` (top-2) | 68,152 (31,859 in / 36,293 out) | ~$1.07 | as above |
+| `--reranker pairwise_top3_llm` | 133,453 (62,358 in / 71,095 out) | ~$2.09 | as above |
 
-All LLM variants use `claude-haiku-4-5`, require `ANTHROPIC_API_KEY`, and are **disabled by
-default** because each measured equal or worse than the local ranker (see
-[What We Tried and Rejected](#what-we-tried-and-rejected)). Every one falls back to the local
-ranking on missing credentials, missing network, or a malformed response — verified to
-reproduce the exact local score of `0.953816` at zero tokens with no key present.
+All LLM variants use `claude-opus-5` (`pipeline/reranker.py::RANKING_MODEL`), require
+`ANTHROPIC_API_KEY`, and are **disabled by default** because each measured equal or worse than
+the local ranker (see [What We Tried and Rejected](#what-we-tried-and-rejected)). Every one
+falls back to the local ranking on missing credentials, missing network, or a malformed
+response — verified to reproduce the exact local score of `0.953816` at zero tokens with no
+key present.
+
+**Correction:** an earlier version of this table named `claude-haiku-4-5` and priced
+accordingly. The code has always defaulted to `claude-opus-5` (verified against the full git
+history — the string `"claude-opus-5"` was set once, at `RANKING_MODEL`'s introduction, and
+never changed); every number above was actually run on it. Opus 5 is 5× Haiku's price on both
+input and output tokens, so every cost figure here is corrected upward accordingly — three of
+the four exactly, from each result file's recorded input/output split.
+
+† `results_llm.json` on disk predates the token-accounting fix elsewhere in this README (it
+still shows the old cumulative-counter bug, 43.2M tokens) and was never regenerated, so its
+input/output split isn't available. The 174,221-token total is the previously reported,
+believed-correct figure; the $1.26 cost is estimated by applying `targeted_llm`'s measured
+89%/11% input/output split — the same prompt shape, a numbered candidate list in and
+comma-separated indices out — rather than taken from a verified split. Re-run
+`python3 tools/run_eval.py --agent pipeline --reranker llm` to regenerate an exact figure.
 
 **Network dependency:** none in the default configuration. The rules note that final scoring
 may run with network access disabled; the submitted default is built for that case, which is

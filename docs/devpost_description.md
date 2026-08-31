@@ -154,9 +154,9 @@ randomised SVD, cosine similarity all hand-implemented)
 **No** PyTorch, Hugging Face, scikit-learn, FAISS, or any vector database — the rules require
 in-memory execution and allow scoring with network disabled, so the dense index is pure NumPy.
 
-**APIs:** Anthropic Claude API (`claude-haiku-4-5`) — used for four optional LLM reranking
+**APIs:** Anthropic Claude API (`claude-opus-5`) — used for four optional LLM reranking
 variants, all measured and **all disabled by default**. The submitted default makes zero API
-calls and requires no credentials. Cost when enabled: $0.12–$0.29 per 200-session run.
+calls and requires no credentials. Cost when enabled: $0.72–$2.09 per 200-session run.
 
 **Development tools:** VS Code, Claude Code, git/GitHub (branch-per-feature with PR review),
 Python `unittest`
