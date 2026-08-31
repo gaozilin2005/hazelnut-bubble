@@ -1,7 +1,7 @@
 # Devpost Project Description
 
 Paste-ready text for the Devpost submission. Every number here is reproducible from
-this repository with the commands in the README's "Reproducing Our Results".
+this repository with the commands in the README's "Setup and Installation".
 
 ---
 

@@ -21,7 +21,7 @@ This document describes **our submission**. For the organizer's original challen
 - [What We Tried and Rejected](#what-we-tried-and-rejected)
 - [Limitations & Future Work](#limitations--future-work)
 - [Model Choice, Cost, and Network Dependency](#model-choice-cost-and-network-dependency)
-- [Reproducing Our Results](#reproducing-our-results)
+- [All Flags and Harnesses](#all-flags-and-harnesses)
 - [Team Contributions](#team-contributions)
 
 ## Results
@@ -86,14 +86,20 @@ the `<(...)` process substitution; under plain `sh`, use
 
 ### 4. Confirm the install
 
-Two commands, roughly a minute each (about 60 s of that is the one-off index build). Both
-scores are exact — if either differs, something in the setup is wrong, and the baseline is the
-more diagnostic of the two because it certifies the harness independently of our code.
+Roughly a minute each (about 60 s of that is the one-off index build). Every score is exact —
+if any differs, something in the setup is wrong, and the baseline is the most diagnostic of
+the four because it certifies the harness independently of our code.
 
 ```bash
-python3 tools/run_eval.py --agent baseline    # -> 0.10671   (organizer's BM25 reference)
-python3 tools/run_eval.py --agent pipeline    # -> 0.969342  (this system)
+python3 tools/run_eval.py --agent baseline              # -> 0.10671   organizer's BM25 reference
+python3 tools/run_eval.py --agent pipeline              # -> 0.969342  this system, as submitted
+python3 tools/run_eval.py --agent pipeline --no-walk    # -> 0.957116  full pages, no walk
+python3 tools/run_eval.py --agent pipeline --no-exposure-gate  # -> 0.911817  ranking alone
 ```
+
+Those four reproduce every row of the [Results](#results) table. The remaining flags,
+ablations and specialised harnesses are catalogued in
+[All Flags and Harnesses](#all-flags-and-harnesses).
 
 ### Using the agent directly
 
@@ -586,23 +592,13 @@ may run with network access disabled; the submitted default is built for that ca
 why `pipeline/dense.py` is an in-process NumPy LSA index rather than a downloaded
 transformer.
 
-## Reproducing Our Results
+## All Flags and Harnesses
 
-```bash
-# Default score (exposure gate + depth paging + single-item walk) — 0.9693
-python3 tools/run_eval.py --agent pipeline
+Reference material: every ablation flag with the effect it measured, plus the evaluation
+harnesses built alongside the agent. The four commands that reproduce the headline table are
+in [Setup and Installation](#setup-and-installation).
 
-# Batched exposure, walk disabled — 0.9571
-python3 tools/run_eval.py --agent pipeline --no-walk
-
-# Ungated: retrieval + ranking only, no exposure control — 0.9118
-python3 tools/run_eval.py --agent pipeline --no-exposure-gate
-
-# Organizer's BM25 baseline, for calibration — 0.10671
-python3 tools/run_eval.py --agent baseline
-```
-
-Each writes `results_<agent>_<dataset>.json`, opening with a `provenance` block recording the
+Each run writes `results_<agent>_<dataset>.json`, opening with a `provenance` block recording the
 commit, branch, whether the tree was dirty, the dataset and every flag — so a results file can
 always answer "what produced this, and is it current?".
 
