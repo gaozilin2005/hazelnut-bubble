@@ -158,9 +158,16 @@ randomised SVD, cosine similarity all hand-implemented)
 **No** PyTorch, Hugging Face, scikit-learn, FAISS, or any vector database — the rules require
 in-memory execution and allow scoring with network disabled, so the dense index is pure NumPy.
 
-**APIs:** Anthropic Claude API (`claude-opus-5`) — used for four optional LLM reranking
-variants, all measured and **all disabled by default**. The submitted default makes zero API
-calls and requires no credentials. Cost when enabled: $0.72–$2.09 per 200-session run.
+**APIs: none.** Every number above was produced with **zero API calls, no credentials, and no
+network** — `requirements.txt` is one line (`numpy`), so the submitted artifact cannot reach an
+external service even if asked to. That is deliberate: the rules allow scoring with network
+disabled, and it means the system has no key to leak, no rate limit to hit, and no per-query
+cost.
+
+We did build four LLM reranking variants against `claude-opus-5` and measure them live. Every
+one scored equal to or worse than the 40-line local reranker, so all four ship disabled and are
+documented as negative results rather than as part of the system — see the README for the
+per-variant numbers and what the failures taught us about reranker calibration.
 
 **Development tools:** VS Code, Claude Code, git/GitHub (branch-per-feature with PR review),
 Python `unittest`
