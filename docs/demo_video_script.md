@@ -169,5 +169,5 @@ python3 tools/run_eval.py --agent pipeline --no-walk
   spots the difference unprompted will weigh it far worse than one who is walked through it.
 - If you run long, cut the 0:30–1:15 dense-retrieval segment first; it is the least
   load-bearing.
-- Say "Claude Haiku 4.5" rather than showing any API key on screen. Check the terminal for a
+- Say "Claude Opus 5" rather than showing any API key on screen. Check the terminal for a
   visible `ANTHROPIC_API_KEY` before recording.
