@@ -158,16 +158,18 @@ randomised SVD, cosine similarity all hand-implemented)
 **No** PyTorch, Hugging Face, scikit-learn, FAISS, or any vector database — the rules require
 in-memory execution and allow scoring with network disabled, so the dense index is pure NumPy.
 
-**APIs: none.** Every number above was produced with **zero API calls, no credentials, and no
-network** — `requirements.txt` is one line (`numpy`), so the submitted artifact cannot reach an
-external service even if asked to. That is deliberate: the rules allow scoring with network
-disabled, and it means the system has no key to leak, no rate limit to hit, and no per-query
-cost.
+**APIs: none on the scored path.** Every number above was produced with **zero API calls, no
+credentials, and no network**. That is deliberate: the rules allow scoring with network
+disabled, so the system has no key to leak, no rate limit to hit, and no per-query cost.
 
-We did build four LLM reranking variants against `claude-opus-5` and measure them live. Every
-one scored equal to or worse than the 40-line local reranker, so all four ship disabled and are
-documented as negative results rather than as part of the system — see the README for the
-per-variant numbers and what the failures taught us about reranker calibration.
+The repository does contain Claude integration, and we would rather point at it than have you
+find it: `pipeline/reranker.py` holds four LLM reranking variants configured for
+`claude-opus-5`, which we built and measured live. Every one scored equal to or worse than the
+40-line local reranker, so all four ship disabled — and because `requirements.txt` is one line
+(`numpy`), the `anthropic` SDK is not even installed by default, so those paths fall back to
+the local ranker rather than calling out. They are documented as negative results, not as part
+of the system; the README has the per-variant numbers and what their failure modes taught us
+about reranker calibration.
 
 **Development tools:** VS Code, Claude Code, git/GitHub (branch-per-feature with PR review),
 Python `unittest`
