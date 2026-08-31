@@ -42,7 +42,7 @@ median is 1.8 ms — see [Latency](#latency)), no network, no credentials.
 
 ## Setup and Installation
 
-Four steps, about two minutes plus a 19 MB download, ending in the two commands that
+Four steps, about two minutes plus a 19 MB download, ending in the four commands that
 reproduce the headline numbers. **Run everything from the repository
 root** — every path in this document is relative to it.
 
@@ -134,7 +134,7 @@ Where each pillar of the problem statement is implemented, and what it measured.
 | **II — retrieval cutoff on over-generality** | `agent.py` exposure gate, `AMBIGUITY_MARGIN` | +0.042; margin-based, replaced a blunt turn gate |
 | **III — turn-budget allocation** | `agent.py` depth paging + single-item walk | +0.0033 and +0.0122 public, both replicated paired on unseen sessions |
 | **II — proactive structured clarification** | `retriever.py::facet_split` → `dialog.py::compose_message` | prompts name the facet the live pool most disagrees on; score-neutral by construction |
-| **II — question-value estimation** | six selectable `--dialog` policies | **unrewardable**: `other` dominates by construction — see below |
+| **II — question-value estimation** | seven selectable `--dialog` policies | **unrewardable**: `other` dominates by construction — see below |
 | **III — context distillation** | `distill.py` (`--distill`) | clean null across three draws |
 | **III — adaptive orchestration** | `agent.py` (`--no-repeat`) | +0.0028 held-out, inside the noise floor; ships off |
 | **III — aspect-level negative feedback** | `agent.py` + `distill.py` (`--neg-aspects`) | +0.017 pre-walk, **−0.006 after**; sign reversed, ships off |
@@ -517,12 +517,16 @@ We kept this code in the repository, disabled by measured constant rather than d
 
 ## Limitations & Future Work
 
-- **The exposure gate still trades some transparency for score.** The margin-based mechanism cut single-item conversions from 65% to 36%, but 36% is not zero — see the disclosure above.
+- **Exposure policy trades transparency for score, and the default leans into it.** The
+  margin-based gate cut single-item conversions from 65% to 36%; the single-item walk then
+  made one item per turn the default, so most conversions are single-item again. That is a
+  deliberate, measured choice rather than a side effect — but it is a choice, and
+  `--no-exposure-gate` (0.9118) is the number that describes retrieval alone.
 - **`ConversationBrain`'s `ConversationState` still does not share `SharedSessionState`'s dataclass.** `IntegratedPolicy` mirrors the router's already-parsed fields into it each turn rather than letting the brain re-parse the transcript itself, which avoids two parsers disagreeing, but the two state objects remain formally separate types. Full unification is unstarted.
 - **The LLM reranking stage is functional but genuinely untested against most real-world phrasing** — it was measured once, live, on the deterministic simulator's templates. We have no evidence of how it performs against paraphrased or free-form customer language.
 - **The held-out baseline discrepancy is unexplained** (see above) — now confirmed twice, independently, but still not understood. Worth investigating before treating either held-out check as fully calibrated.
 - **Pillar III is implemented but nothing in it earns its keep.** Context distillation (`distill.py`), long-term cross-session memory (`--dialog dynamic`), item-level orchestration (`--no-repeat`) and aspect-level negative feedback (`--neg-aspects`) all exist and all ship disabled: three measured null-to-negative, and the fourth reversed sign once the single-item walk changed what a rejection means. We would rather report four honest nulls than enable a flag we cannot defend on held-out data.
-- **Slot decay over time is not implemented**, though §4.3 of the brief lists it as in scope. Decay down-weights older constraints so a drifting conversation is not held hostage by an early statement. It has nothing to act on here: the evaluator derives every disclosed constraint from one static intent card (`materialize_hidden_fields`), so a turn-1 constraint is exactly as true at turn 9 — the only genuine staleness, an intent override, is already handled by `erase_superseded` as a hard rewrite rather than a decay. We judged that building a decay curve against a simulator that cannot produce stale slots would measure our own scaffolding rather than the mechanism, and chose to leave it unbuilt and say so. It is the first thing we would add against real dialog logs.
+- **Slot decay over time is not implemented**, though §4.3 of the brief lists it as in scope. Decay down-weights older constraints so a drifting conversation is not held hostage by an early statement. It has nothing to act on here: the evaluator derives every disclosed constraint from one static intent card (`materialize_hidden_fields`), so a turn-1 constraint is exactly as true at turn 9 — the only genuine staleness, an intent override, is already handled at the state layer by `superseded_constraints` — marked inactive for the dialog, kept for retrieval — rather than by a decay (`--erase-on-override` is the harder-line variant, measured −0.006 and shipped off). We judged that building a decay curve against a simulator that cannot produce stale slots would measure our own scaffolding rather than the mechanism, and chose to leave it unbuilt and say so. It is the first thing we would add against real dialog logs.
 
 - **We reconstructed a 4GB proxy catalog before discovering the official 19MB release existed** on the organizer's own GitHub org rather than the team's working fork. That tool (`tools/build_dev_catalog.py`) remains in the repo for reference but should not be used for official reproduction — the official catalog download above is the correct path. (Two of us independently lost time to this exact confusion — see `docs/holdout_evaluation.md`.)
 
