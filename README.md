@@ -38,8 +38,10 @@ Where each pillar of the problem statement is implemented, and what it measured.
 | **II — proactive structured clarification** | `retriever.py::facet_split` → `dialog.py::compose_message` | prompts name the facet the live pool most disagrees on; score-neutral by construction |
 | **II — question-value estimation** | six selectable `--dialog` policies | **unrewardable**: `other` dominates by construction — see below |
 | **III — context distillation** | `distill.py` (`--distill`) | clean null across three draws |
-| **III — adaptive orchestration** | `agent.py` (`--no-repeat`) | +0.0006 under the default gate; never worsens a session |
+| **III — adaptive orchestration** | `agent.py` (`--no-repeat`) | +0.0028 held-out, inside the noise floor; ships off |
+| **III — aspect-level negative feedback** | `agent.py` + `distill.py` (`--neg-aspects`) | +0.017 pre-walk, **−0.006 after**; sign reversed, ships off |
 | **III — long-term memory** | `dialog.py::DynamicPolicy` (`--dialog dynamic`) | −0.008 public, −0.013 held-out |
+| **in-scope: slot decay over time** | *not implemented* | see [Limitations](#limitations--future-work) — the simulator's constraints cannot go stale |
 
 Everything marked as measured-and-rejected ships disabled behind a flag rather than deleted,
 so any claim here can be re-run rather than taken on trust.
@@ -410,19 +412,55 @@ Each flag alone against the shared baseline, on four draws — the public set, t
 
 **Item-level orchestration is a small, safe positive** — +0.0002 / +0.0029 / +0.0020, never negative, exactly baseline at every paraphrase level. Its ceiling is structural: `ranked` is `candidates[:max(rerank_pool, top_k)]`, the top ten only, so demotion reorders what was already going to be shown and can never reach rank 11+.
 
-**Aspect-level negative feedback is the substantial one, and it replicates.** +0.0166 / +0.0116 / +0.0140 across three held-out draws, two of them independently seeded and never tuned against. Roughly 5× item-level demotion, exactly the direction Bi et al. predict. Unlike everything else measured in this repository, the gain is **Hit@10, not reordering**:
+**Aspect-level negative feedback replicated cleanly — and then reversed.** This is the
+most instructive result in the repository, so it is reported in full rather than quietly
+deleted.
 
-| W | Hit@10 | MRR | MTTC | Score |
+Measured against the pre-walk baseline, it was the largest gain here: **+0.0166 / +0.0116 /
++0.0140** across three held-out draws, two independently seeded and never tuned against.
+Roughly 5× item-level demotion, exactly the direction Bi et al. predict, and — uniquely among
+everything measured in this repo — the gain was **Hit@10, not reordering**: +21 targets found
+per 1,000 sessions, with MRR up and MTTC faster at the same time.
+
+| W (pre-walk baseline) | Hit@10 | MRR | MTTC | Score |
 |---|---|---|---|---|
 | 0.0 | 0.9620 | 0.6741 | 2.43 | 0.8545 |
 | 1.0 | **0.9830** | 0.6837 | **2.27** | 0.8711 |
 | 8.0 | 0.9800 | 0.6944 | 2.33 | 0.8718 |
 
-**+21 targets found per 1,000 sessions**, with MRR up *and* MTTC faster — all three metrics moving the right way at once, which nothing else here has managed. It also **improves paraphrase robustness at every level** (L1 +0.0114, L2 +0.0143, L3 +0.0060, L4 +0.0064, L0 exactly neutral), and the two mechanisms compose: together +0.0192 / +0.0181.
+**Re-measured against the current default — with the single-item walk and depth paging in
+place — the sign flips on every draw:**
 
-The public set is unmoved because it is saturated — Hit@10 is already 1.000 ungated, so there are no missed targets left to find there. That divergence is the point: the held-out draws are the ones that resemble the private 800.
+| on current `main` | public | held-1000 | held-200 (s.7) | held-1000 Hit@10 |
+|---|---|---|---|---|
+| **shipped default** | **0.9693** | **0.8770** | **0.8764** | **0.993** |
+| `--no-repeat` | 0.9693 | 0.8798 | 0.8772 | 0.993 |
+| `--neg-aspects 1.0` | 0.9688 | 0.8706 | 0.8672 | 0.982 |
+| `--no-repeat --neg-aspects 1.0` | 0.9688 | 0.8724 | 0.8700 | 0.982 |
 
-Both flags nevertheless ship **OFF**, pending a team decision on flipping the default. W=1.0 is a round value in the middle of a flat plateau rather than the argmax; W=2.0 measured marginally better on all three draws (+0.001–0.003), which is inside the plateau and not worth tuning to.
+Hit@10 falling 0.993 → 0.982 is the diagnostic: this is not reshuffling, it is **losing ~11
+targets per 1,000 that the default finds**.
+
+**Why it inverted.** The mechanism was designed when a turn showed ten products, so a
+rejection meant "all ten are wrong" — broad, diffuse evidence spread over many aspect values.
+The walk shows *one* product per turn. Each rejection now decomposes a single item and
+penalises its aspects at full weight. But the item just walked past is the target's **nearest
+neighbour in our own ranking** — it shares the target's category, colour, and material almost
+by construction. So the penalty lands on precisely the aspects the target has, and pushes it
+down. Two individually sound mechanisms, mutually destructive.
+
+**Consequence: `--neg-aspects` ships OFF, and the earlier positive result is retained above
+rather than erased.** It was correctly measured; it was measured against a baseline that no
+longer exists. The generalisable lesson is that an ablation is only valid against the
+baseline it was run on — a flag validated on three independent draws still had to be
+re-measured after an unrelated part of the system changed, and re-measuring is what caught
+it. (A stacked-PR race meant the default-flip PR never actually reached `main`; had it
+merged, this reversal would have shipped silently.)
+
+`--no-repeat` alone is +0.0028 / +0.0008 — positive on both draws, but inside the documented
+±0.007 single-draw noise floor and now largely redundant, since the walk already declines to
+re-offer confirmed non-targets. It also ships **OFF**, on the grounds that an effect this
+small does not justify a default change this late.
 
 ## Held-Out Generalization Check
 
@@ -504,7 +542,9 @@ We kept this code in the repository, disabled by measured constant rather than d
 - **`ConversationBrain`'s `ConversationState` still does not share `SharedSessionState`'s dataclass.** `IntegratedPolicy` mirrors the router's already-parsed fields into it each turn rather than letting the brain re-parse the transcript itself, which avoids two parsers disagreeing, but the two state objects remain formally separate types. Full unification is unstarted.
 - **The LLM reranking stage is functional but genuinely untested against most real-world phrasing** — it was measured once, live, on the deterministic simulator's templates. We have no evidence of how it performs against paraphrased or free-form customer language.
 - **The held-out baseline discrepancy is unexplained** (see above) — now confirmed twice, independently, but still not understood. Worth investigating before treating either held-out check as fully calibrated.
-- **No component of this system uses the accumulated dialog *history* for anything beyond constraint accumulation** — Pillar III's "Personalized Context Distillation" and long-term profile updating are not implemented.
+- **Pillar III is implemented but nothing in it earns its keep.** Context distillation (`distill.py`), long-term cross-session memory (`--dialog dynamic`), item-level orchestration (`--no-repeat`) and aspect-level negative feedback (`--neg-aspects`) all exist and all ship disabled: three measured null-to-negative, and the fourth reversed sign once the single-item walk changed what a rejection means. We would rather report four honest nulls than enable a flag we cannot defend on held-out data.
+- **Slot decay over time is not implemented**, though §4.3 of the brief lists it as in scope. Decay down-weights older constraints so a drifting conversation is not held hostage by an early statement. It has nothing to act on here: the evaluator derives every disclosed constraint from one static intent card (`materialize_hidden_fields`), so a turn-1 constraint is exactly as true at turn 9 — the only genuine staleness, an intent override, is already handled by `erase_superseded` as a hard rewrite rather than a decay. We judged that building a decay curve against a simulator that cannot produce stale slots would measure our own scaffolding rather than the mechanism, and chose to leave it unbuilt and say so. It is the first thing we would add against real dialog logs.
+
 - **We reconstructed a 4GB proxy catalog before discovering the official 19MB release existed** on the organizer's own GitHub org rather than the team's working fork. That tool (`tools/build_dev_catalog.py`) remains in the repo for reference but should not be used for official reproduction — the official catalog download above is the correct path. (Two of us independently lost time to this exact confusion — see `docs/holdout_evaluation.md`.)
 
 ## Team Contributions
