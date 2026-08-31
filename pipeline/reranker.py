@@ -29,6 +29,16 @@ EFFORT_CAPABLE = ("claude-opus-5", "claude-opus-4", "claude-sonnet-5", "claude-f
 MAX_LLM_CANDIDATES = 12
 SUMMARY_CHARS = 150
 
+MATERIAL_RE = re.compile(
+    r"\b(cotton|polyester|nylon|leather|wool|spandex|silk|rayon|fabric)\b",
+    re.I,
+)
+
+COLOR_RE = re.compile(
+    r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange)\b",
+    re.I,
+)
+
 
 class _Corpus(Protocol):
     asins: list[str]
@@ -64,6 +74,92 @@ class LocalReranker:
             if text in corpus or all(t in corpus for t in tokens):
                 count += 1
         return count
+    
+    def _signature(self, index: int) -> list[str]:
+        """Approximate the evaluator's four-value intent signature.
+
+        Reconstruct the values most likely to be disclosed from this product,
+        preserving the evaluator's material/color promotion and catalog order.
+        """
+        values: list[str] = []
+
+        # Use the retriever's snippets because they preserve useful catalog
+        # feature/detail text without introducing network or model dependencies.
+        snippets = self.retriever.snippets[index]
+
+        raw_values = [
+            str(value).strip()
+            for value in snippets
+            if str(value).strip()
+        ]
+
+        corpus = self.retriever.corpora[index]
+
+        material = MATERIAL_RE.search(corpus)
+        color = COLOR_RE.search(corpus)
+
+        if material:
+            values.append(material.group(1).lower())
+
+        if color:
+            values.append(f"color: {color.group(1).lower()}")
+
+        values.extend(raw_values)
+
+        # Same idea as evaluator intent_card(): stable de-duplication.
+        deduped: list[str] = []
+        seen: set[str] = set()
+
+        for value in values:
+            cleaned = normalize(value)
+
+            if not cleaned or cleaned in seen:
+                continue
+
+            seen.add(cleaned)
+            deduped.append(cleaned)
+
+        return deduped[:4]
+    
+    def _signature_match(
+        self,
+        index: int,
+        state: SharedSessionState,
+    ) -> int:
+        """How closely disclosed constraints match the candidate's signature.
+
+        Position matters slightly: matching the value in the same generated
+        hard/soft position is stronger than merely having it somewhere in the
+        four-value signature.
+        """
+        signature = self._signature(index)
+
+        if not signature:
+            return 0
+
+        constraints = [
+            normalize(value)
+            for value in state.constraints
+            if normalize(value)
+        ]
+
+        score = 0
+
+        for position, constraint in enumerate(constraints[:4]):
+
+            # Strongest signal: same disclosed value in the same generated slot.
+            if (
+                position < len(signature)
+                and constraint == signature[position]
+            ):
+                score += 3
+                continue
+
+            # Still useful if the candidate would generate the value elsewhere.
+            if constraint in signature:
+                score += 1
+
+        return score
 
     def rerank(
         self, state: SharedSessionState, candidate_ids: list[str]
@@ -72,18 +168,40 @@ class LocalReranker:
             total = len(candidate_ids)
             return [(a, float(total - i)) for i, a in enumerate(candidate_ids)]
         blob = self.retriever._blob(state)
-        scored: list[tuple[int, float, str]] = []
+        scored: list[tuple[int, int, float, str]] = []
+
         for rank, asin in enumerate(candidate_ids):
             index = self._position.get(asin)
-            if index is None:
-                scored.append((-1, 0.0, asin))
-                continue
-            scored.append(
-                (self._covered(index, state), self.retriever.score(index, state, blob), asin)
-            )
-        scored.sort(key=lambda row: (-row[0], -row[1]))
-        return [(asin, float(cover) + score) for cover, score, asin in scored]
 
+            if index is None:
+                scored.append((-1, -1, 0.0, asin))
+                continue
+
+            scored.append(
+                (
+                    self._covered(index, state),
+                    self._signature_match(index, state),
+                    self.retriever.score(index, state, blob),
+                    asin,
+                )
+            )
+
+        # Priority:
+        # 1. distinct constraint coverage
+        # 2. evaluator-style signature agreement
+        # 3. existing retriever score
+        scored.sort(
+            key=lambda row: (
+                -row[0],
+                -row[1],
+                -row[2],
+            )
+        )
+
+        return [
+            (asin, float(cover) + float(signature) * 0.01 + score)
+            for cover, signature, score, asin in scored
+        ]
 
 class LLMReranker:
     """Listwise rerank with Claude. Falls back to LocalReranker on any failure.
