@@ -28,6 +28,15 @@ class SharedSessionState:
     # message, but the override event itself lands on turn 3 or 4.
     override_turn: int | None = None
     override_value: str | None = None   # what the customer switched TO, verbatim
+    
+    # Constraints that the user explicitly replaced during an Intent Override.
+    #
+    # IMPORTANT:
+    # These remain inside `constraints` as retrieval evidence because experiments
+    # show that removing them hurts TechnicalScore. This set represents the
+    # conversational meaning only: these values are no longer ACTIVE preferences.
+    superseded_constraints: set[str] = field(default_factory=set)
+    
     category: str | None = None          # parsed coarse category, verbatim
     category_confident: bool = False     # False => retrieval must not hard-filter
 

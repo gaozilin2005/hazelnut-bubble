@@ -334,7 +334,17 @@ class IntegratedPolicy:
         mirror = self.brain.get_state(state.session_id)
         mirror.current_turn = state.turn
         mirror.category = state.category
-        mirror.known_constraints = list(state.constraints)
+        
+        mirror.known_constraints = [
+            value
+            for value in state.constraints
+            if value not in state.superseded_constraints
+        ]
+
+        mirror.superseded_constraints = set(
+            state.superseded_constraints
+        )
+        
         mirror.no_preference_attributes |= state.no_preference
 
         previous_count, _ = self.seen.get(state.session_id, (-1, ""))
@@ -351,10 +361,16 @@ class IntegratedPolicy:
         # announced a change on turn 1, before anything had changed.
         just_overrode = state.override_turn == state.turn and bool(state.override_value)
 
+        active_constraints = [
+            value
+            for value in state.constraints
+            if value not in state.superseded_constraints
+        ]
+        
         message = compose_message(
             intent=state.intent,
             category=state.category,
-            constraints=state.constraints,
+            constraints=active_constraints,
             turn=state.turn,
             override_new=state.override_value if just_overrode else None,
             settled=settled and not just_overrode,
@@ -532,25 +548,57 @@ class PipelineAgent:
             user_profile=profile,
         )
         self.dialog.reset(session_id, user_profile or {})
+        
+    def _is_ambiguous(
+        self,
+        state: SharedSessionState,
+        ranked: list[tuple[str, float]],
+    ) -> bool:
+        """Return True when the current ranking is too uncertain to trust.
 
-    def _exposure(
-        self, state: SharedSessionState, ranked: list[tuple[str, float]], top_k: int
-    ) -> int:
-        """How many recommendations to actually show this turn. See the module
-        docstring above CONFIDENT_EXPOSURE for the full measurement."""
-        if not self.exposure_gate or state.turn >= self.release_turn or len(ranked) < 2:
-            return top_k
+        Cold-start sessions with no disclosed constraints are treated as
+        over-general by definition. Otherwise, ambiguity is measured from the
+        retriever-score margin between the top two candidates.
+        """
         if not state.constraints:
-            # Cold start: nothing disclosed yet, so there is no score margin to
-            # measure ambiguity against. Withhold anyway -- showing a ranking
-            # built on nothing is exactly the over-generality case.
-            return self.exposure
+            return True
+
+        if len(ranked) < 2:
+            return False
+
         blob = self.retriever._blob(state)
-        i0, i1 = self._position[ranked[0][0]], self._position[ranked[1][0]]
+
+        i0 = self._position[ranked[0][0]]
+        i1 = self._position[ranked[1][0]]
+
         s0 = self.retriever.score(i0, state, blob)
         s1 = self.retriever.score(i1, state, blob)
-        ambiguous = (s0 - s1) <= AMBIGUITY_MARGIN * max(abs(s0), 1e-6)
-        return self.exposure if ambiguous else top_k
+
+        return (
+            (s0 - s1)
+            <= AMBIGUITY_MARGIN * max(abs(s0), 1e-6)
+        )
+
+    def _exposure(
+        self,
+        state: SharedSessionState,
+        ranked: list[tuple[str, float]],
+        top_k: int,
+    ) -> int:
+        """How many recommendations to expose this turn."""
+
+        if (
+            not self.exposure_gate
+            or state.turn >= self.release_turn
+            or len(ranked) < 2
+        ):
+            return top_k
+
+        return (
+            self.exposure
+            if self._is_ambiguous(state, ranked)
+            else top_k
+        )
 
     def _drop_seen(
         self, session_id: str, ranked: list[tuple[str, float]]
@@ -624,13 +672,18 @@ class PipelineAgent:
         candidates = self.retriever.retrieve(state, CANDIDATE_POOL, cutoff=top_k)
         ranked = self.reranker.rerank(state, candidates[:max(self.rerank_pool, top_k)])
         # Proactive guidance: what are the surviving candidates most divided on?
+        ambiguous = self._is_ambiguous(state, ranked)
         facet = (
             self.retriever.facet_split(
                 candidates,
                 skip_attributes=self.dialog.facets_offered(session_id),
                 disclosed=" ".join(state.constraints).lower(),
             )
-            if self.dialog.name == "integrated" else None
+            if (
+                self.dialog.name == "integrated"
+                and ambiguous
+            )
+            else None
         )
         message, attribute = (
             self.dialog.ask(state, facet) if self.dialog.name == "integrated"
