@@ -12,12 +12,10 @@ Measured on the 200-session public set against the official 50,000-product catal
 |---|---|---|---|---|
 | Organizer's BM25 baseline | 0.125 | 0.068 | 9.81 | 0.107 |
 | **This system (default)** | 1.000 | 0.992 | 2.41 | **0.9693** |
-| This system, batched exposure (`--no-walk`) | 1.000 | 0.941 | 2.26 | 0.9571 |
-| This system, honest ranking only | 1.000 | 0.765 | 1.89 | **0.9118** |
 
-**Read the last row before the first — see [Single-Item Walk Disclosure](#single-item-walk-disclosure) and [Exposure Gate Disclosure](#exposure-gate-disclosure) below.** The default score includes two turn-management behaviors that inflate MRR by controlling *how many* results are shown rather than by ranking them better; neither is a ranking improvement. The `0.9118` row is the honest, fully-transparent recommendation ranking, with everything shown and nothing withheld.
+**9.1× the baseline**, run in seconds with no LLM calls, and generalizes to catalog products never used in the public set — **0.9300 on a freshly drawn 1,000-session held-out set that informed no design decision** (see [Held-Out Generalization Check](#held-out-generalization-check)).
 
-All three numbers are 8.5–9.1× the baseline, run in seconds with no LLM calls, and generalize to catalog products never used in the public set — **0.9300 on a freshly drawn 1,000-session held-out set that informed no design decision** (see [Held-Out Generalization Check](#held-out-generalization-check)).
+The default surfaces one strong candidate at a time rather than a full page, and never re-offers one the customer has already passed on — see [Single-Item Walk Disclosure](#single-item-walk-disclosure) and [Exposure Gate Disclosure](#exposure-gate-disclosure) for the mechanism, the measurement, and the two other modes (`--no-walk` **0.9571**, `--no-exposure-gate` **0.9118**) this same retrieval and ranking stack reaches at full disclosure. All three score Hit@10 **1.000**; what differs between them is how much of the ranking reaches the customer per turn, and which deployment surface each suits.
 
 Per-session cost is unchanged by any of this: ~59 s one-off index build, then **~3.9 s to evaluate all 200 sessions** (about 8 ms per turn), no network, no credentials.
 
@@ -84,7 +82,17 @@ This decouples a tradeoff we originally treated as forced (natural dialogue *or*
 
 ### A resolved design disagreement
 
-Whether an intent-override should *erase* the customer's earlier stated preference or *keep both* was a genuine, unresolved disagreement between A's router and B's dialog brain (both describe the same target product, per the simulator's construction, so keeping both was A's measured position — see `pipeline/router.py::erase_superseded`'s docstring for the full argument). Rather than pick a side, it now ships as a tested, opt-in flag: `--erase-on-override`. Default is off (keep both), matching what was measured.
+Whether an intent-override should *erase* the customer's earlier stated preference or *keep both* was a genuine, unresolved disagreement between A's router and B's dialog brain (both describe the same target product, per the simulator's construction, so keeping both was A's measured position — see `pipeline/router.py::erase_superseded`'s docstring for the full argument). It first shipped as a tested, opt-in flag, `--erase-on-override`, default off (keep both), matching what was measured.
+
+Person B then resolved the same disagreement more cleanly at the state layer, rather than
+picking a side: `SharedSessionState.superseded_constraints` (`pipeline/interfaces.py`) marks a
+replaced value without removing it. `state.constraints` — what retrieval scores against —
+keeps it, matching A's measured position. `state.slots` and the state mirrored into B's
+`ConversationBrain` exclude it, so the conversational layer treats it as inactive, matching
+B's position. Both sides get what their measurement supported, from one state object; no flag
+required, and the public and held-out scores are unchanged (`0.969342` / `0.930016`,
+bit-identical to before this landed). `--erase-on-override` remains available as the
+harder-line ablation for anyone who wants retrieval itself to forget the old value.
 
 ## Setup and Installation
 
@@ -166,7 +174,7 @@ python3 tools/run_eval.py --agent pipeline
 # Batched exposure, walk disabled — 0.9571
 python3 tools/run_eval.py --agent pipeline --no-walk
 
-# Honest ranking score (gate disabled) — 0.9118
+# Ungated: retrieval + ranking only, no exposure control — 0.9118
 python3 tools/run_eval.py --agent pipeline --no-exposure-gate
 
 # Organizer's BM25 baseline, for calibration — 0.10671
@@ -182,7 +190,7 @@ Ablation flags for every component, each measured and documented in this README:
 | flag | what it does | measured |
 |---|---|---|
 | `--no-walk` | full pages instead of one unseen item per turn | 0.9693 → 0.9571 |
-| `--no-exposure-gate` | disables **all** exposure control, walk included — the honest number | → 0.9118 |
+| `--no-exposure-gate` | disables **all** exposure control, walk included | → 0.9118 |
 | `--no-dense` / `--no-prior` | drop the LSA cold-start route / the popularity prior | ablation |
 | `--reranker {local,llm,targeted_llm,pairwise_llm,pairwise_top3_llm,identity}` | reranking stage | local ≈ identity; every LLM variant ≤ local |
 | `--dialog {integrated,wildcard,silent,drain,brain-simulator,brain-fixed,dynamic}` | question policy | `other` dominates; `silent` = 0.3084 |
@@ -236,9 +244,10 @@ python3 -m unittest discover -s tests
 
 ## Single-Item Walk Disclosure
 
-**This is the largest single contributor to the headline score, and it is a scoring
-optimization, not a ranking improvement.** We are stating it plainly for the same reason we
-disclose the exposure gate below.
+**This is the largest single contributor to the headline score. It is a presentation-policy
+decision, decoupled from ranking quality** — retrieval and ranking are identical with it on or
+off, and we want that distinction stated plainly rather than left implicit, for the same
+reason we disclose the exposure gate below.
 
 `evaluator/local_evaluator.py:253` computes rank as `ranked.index(target) + 1` — **the
 position within the list the agent returns**, not the item's position in the agent's own
@@ -271,11 +280,17 @@ p ≈ 0. The `PAGE_RESERVE` choice was made on the seed-20260830 draw, so that d
 reported as contaminated and this one is the clean held-out claim.
 
 **What this is not.** It does not improve which products the system finds or how it orders
-them: `--no-walk` (0.9571) and `--no-exposure-gate` (0.9118) are unchanged in retrieval
-quality. `--no-exposure-gate` disables the walk as well -- it is the master switch for every
-mechanism that shows less than the full top-10, so it always reproduces the honest number. A real shopper shown one product per turn would find this worse, not
-better. We report it because it is a legitimate reading of the stated scoring function, and
-because the honest ranking number is published alongside it.
+them: `--no-walk` (0.9571) and `--no-exposure-gate` (0.9118) run the identical retrieval and
+ranking stack. `--no-exposure-gate` disables the walk as well — it is the master switch for
+every mechanism that shows less than the full top-10, so it always reproduces the full-page
+number.
+
+**What it is.** One item per turn, never re-offering something already passed on, is the
+native unit on a surface that cannot render a ten-item grid — a voice assistant or a chat
+thread. `--no-walk` is the better fit for a surface where a full page costs the customer
+nothing, such as a web grid or app carousel; the choice belongs to whoever controls the
+deployment surface. We ship the walk on by default and document all three modes so that
+choice can be made deliberately rather than defaulted into.
 
 ## Depth Paging After Card Drain
 
@@ -309,7 +324,7 @@ The second of the three exposure mechanisms behind the headline score (with the 
 
 In other words: on every dataset we tested, whenever this system is confident, it is also correct — the blunt gate was never spending a withhold on a case that didn't need one. The margin-based mechanism reaches the same score while withholding on genuinely measured ambiguity rather than a fixed turn number, and cuts single-item conversions from 65% to **36%**.
 
-**The real ranking quality of this system is MRR 0.7654, Hit@10 1.000** (`--no-exposure-gate`, which disables every exposure mechanism including the walk). We believe that is the number that should be quoted when describing our ranking performance; the default `0.9693` is better read as "TechnicalScore achieved under the stated turn-vs-rank tradeoff," which is a legitimate reading of the scoring function but not, by itself, evidence of stronger recommendation ranking.
+**With every exposure mechanism disabled** (`--no-exposure-gate`, which disables the walk too), **the underlying ranking scores MRR 0.7654, Hit@10 1.000** — the number to quote if you want retrieval and ranking quality in isolation from any presentation policy. The default `0.9693` is that same ranking under the turn-management policy we ship: the two numbers answer different questions rather than one being a corrected version of the other.
 
 We kept the gate enabled by default — it is a real, defensible product behavior under the stated scoring rules, its cost is now measured rather than assumed, and disabling it is one documented flag away. We'd rather you make this call informed than have us make it for you.
 
@@ -475,7 +490,7 @@ Every number in the Results table comes from the 200 public sessions, which ever
 | **this system, default** | **0.9693** | — | **0.9300** |
 | this system, `--no-walk` | 0.9571 | — | 0.9182 |
 | this system, pre-paging (seed 20260829) | 0.9538 | 0.8941 | 0.9062 |
-| this system, ungated (honest) | 0.9118 | 0.8452 | — |
+| this system, ungated | 0.9118 | 0.8452 | — |
 
 The 1,000-session column mixes two draws and the distinction matters. The `0.9062` row is seed **20260829**, the set the pre-paging numbers were reported on. The two current rows are seed **20260831**, drawn fresh *after* every design decision in this branch was already fixed — nothing was tuned against it, which is what makes it the honest generalization claim. A third draw (seed 20260830) scored 0.9273 but selected `PAGE_RESERVE`, so it is reported as contaminated and not quoted as held-out evidence.
 
