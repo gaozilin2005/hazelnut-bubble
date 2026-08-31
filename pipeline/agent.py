@@ -334,7 +334,17 @@ class IntegratedPolicy:
         mirror = self.brain.get_state(state.session_id)
         mirror.current_turn = state.turn
         mirror.category = state.category
-        mirror.known_constraints = list(state.constraints)
+        
+        mirror.known_constraints = [
+            value
+            for value in state.constraints
+            if value not in state.superseded_constraints
+        ]
+
+        mirror.superseded_constraints = set(
+            state.superseded_constraints
+        )
+        
         mirror.no_preference_attributes |= state.no_preference
 
         previous_count, _ = self.seen.get(state.session_id, (-1, ""))
@@ -351,10 +361,16 @@ class IntegratedPolicy:
         # announced a change on turn 1, before anything had changed.
         just_overrode = state.override_turn == state.turn and bool(state.override_value)
 
+        active_constraints = [
+            value
+            for value in state.constraints
+            if value not in state.superseded_constraints
+        ]
+        
         message = compose_message(
             intent=state.intent,
             category=state.category,
-            constraints=state.constraints,
+            constraints=active_constraints,
             turn=state.turn,
             override_new=state.override_value if just_overrode else None,
             settled=settled and not just_overrode,

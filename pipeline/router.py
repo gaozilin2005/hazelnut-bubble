@@ -95,18 +95,27 @@ def parse_reply(message: str) -> tuple[bool, list[str]]:
 
 
 def fill_slots(state: SharedSessionState) -> None:
-    """Project the flat constraint list onto per-attribute slots.
+    """Project retrieval evidence onto ACTIVE conversational slots.
 
-    Pillar II asks for incremental slots. `state.constraints` is kept as the
-    ordered verbatim list because that is what retrieval scores against; slots
-    are the structured view over the same facts, rebuilt each turn so the two
-    can never disagree.
+    `state.constraints` retains every disclosed value because historical
+    constraints can still help retrieval.
+
+    `state.slots`, however, represents the user's current intent, so values
+    explicitly superseded by an Intent Override are excluded.
     """
     slots: dict[str, list[str]] = {}
-    for value in state.constraints:
-        slots.setdefault(classify_attribute(value), []).append(value)
-    state.slots = slots
 
+    for value in state.constraints:
+
+        if value in state.superseded_constraints:
+            continue
+
+        slots.setdefault(
+            classify_attribute(value),
+            []
+        ).append(value)
+
+    state.slots = slots
 
 def parse_no_preference(message: str) -> str | None:
     """-> the attribute the customer just declined, if any.
@@ -160,16 +169,25 @@ def route(state: SharedSessionState, message: str, turn: int) -> SharedSessionSt
 
     is_override, constraints = parse_reply(message)
     if is_override:
-        # The simulator draws old_value and new_value from the SAME target's
-        # intent card, so they describe one product and never truly conflict.
-        # Earlier constraints are therefore kept, not discarded.
         state.intent = INTENT_OVERRIDE
+
         if state.override_turn is None:
             state.override_turn = turn
-            # Record it verbatim: add_constraint dedupes, so a repeated value
-            # leaves `constraints` unchanged and the last element is stale.
+
             if constraints:
                 state.override_value = constraints[0]
+
+                # The first constraint in an Intent Override session is the
+                # preference being replaced.
+                #
+                # Keep it in state.constraints because it remains useful retrieval
+                # evidence, but mark it as superseded so the conversational state
+                # knows it is no longer an active preference.
+                if state.constraints:
+                    old_value = state.constraints[0]
+
+                    if old_value != state.override_value:
+                        state.superseded_constraints.add(old_value)
     for value in constraints:
         state.add_constraint(value)
     fill_slots(state)
