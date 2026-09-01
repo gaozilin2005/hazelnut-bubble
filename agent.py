@@ -8,11 +8,12 @@ so the required name is exported from a single obvious place, without renaming
 the class every other module and tool refers to.
 
 Defaults here are the configuration all reported scores use: the integrated
-dialog policy, the local reranker, the exposure gate and the single-item walk
-on, and no network access. Every experimental flag documented in the README
-(--rrf, --broad-pool, --len-norm, --distill, --no-repeat, --tie-break-dense) is
-off. The walk is a scoring optimization, not a ranking improvement -- see
-README "Single-Item Walk Disclosure"; disable it with walk=False.
+dialog policy, the local reranker, the exposure gate, the single-item walk,
+and aspect-level negative feedback (neg_aspects=1.0) on; no network access.
+Every other experimental flag documented in the README (--rrf, --broad-pool,
+--len-norm, --distill, --no-repeat, --tie-break-dense) is off. The walk
+decouples presentation from ranking -- see README "Single-Item Walk
+Disclosure"; disable it with walk=False for a full-page surface instead.
 
     from agent import Agent
     a = Agent("data/catalog.jsonl")

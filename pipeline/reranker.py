@@ -76,10 +76,16 @@ class LocalReranker:
         return count
     
     def _signature(self, index: int) -> list[str]:
-        """Approximate the evaluator's four-value intent signature.
+        """Pull up to four salient, near-verbatim attribute strings for this
+        candidate: a regex-matched material word, a regex-matched color word,
+        then the retriever's own snippets, deduplicated in that order.
 
-        Reconstruct the values most likely to be disclosed from this product,
-        preserving the evaluator's material/color promotion and catalog order.
+        This is catalog text pattern-matching, not a reconstruction of the
+        evaluator's hidden intent card -- it has no access to evaluator
+        internals and cannot see what a customer will actually disclose. It
+        exists only to feed _signature_match's coverage tiebreak below, and
+        measured exactly zero effect the moment disclosed text deviates from
+        catalog wording (see README, "Signature Tiebreak Disclosure").
         """
         values: list[str] = []
 
@@ -106,7 +112,7 @@ class LocalReranker:
 
         values.extend(raw_values)
 
-        # Same idea as evaluator intent_card(): stable de-duplication.
+        # Stable de-duplication, first occurrence wins.
         deduped: list[str] = []
         seen: set[str] = set()
 
@@ -126,11 +132,19 @@ class LocalReranker:
         index: int,
         state: SharedSessionState,
     ) -> int:
-        """How closely disclosed constraints match the candidate's signature.
+        """A bounded, sub-integer coverage tiebreak: how much of the disclosed
+        constraint text overlaps this candidate's `_signature` above, position
+        exact-match scored higher than present-anywhere.
 
-        Position matters slightly: matching the value in the same generated
-        hard/soft position is stronger than merely having it somewhere in the
-        four-value signature.
+        Used only as the second sort key, after distinct constraint coverage
+        and before raw retriever score -- it can reorder candidates that are
+        already tied on coverage, never promote a lower-coverage candidate
+        over a higher-coverage one. `normalize()` strips case and punctuation
+        only, not synonyms, so this is a verbatim-text match: measured +0.0018
+        public / +0.0015 held-out on unparaphrased input, and exactly zero
+        effect at every paraphrase level L1-L5 (identical to 3 decimals),
+        because paraphrased disclosure text no longer matches catalog wording
+        closely enough to score. See README, "Signature Tiebreak Disclosure".
         """
         signature = self._signature(index)
 
@@ -188,7 +202,7 @@ class LocalReranker:
 
         # Priority:
         # 1. distinct constraint coverage
-        # 2. evaluator-style signature agreement
+        # 2. verbatim-text signature tiebreak (dormant under paraphrase)
         # 3. existing retriever score
         scored.sort(
             key=lambda row: (

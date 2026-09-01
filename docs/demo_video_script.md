@@ -55,8 +55,8 @@ python3 tools/run_eval.py --agent pipeline
 
 Let it finish; point at the output.
 
-> "Hit Rate at 10: one hundred percent. MRR: 0.992. Mean turns to conversion: 2.4.
-> TechnicalScore 0.9693 — against the organiser's BM25 baseline at 0.107. About nine times the
+> "Hit Rate at 10: one hundred percent. MRR: 0.996. Mean turns to conversion: 2.4.
+> TechnicalScore 0.9707 — against the organiser's BM25 baseline at 0.107. About nine times the
 > baseline, and the whole run takes under four seconds after the index build."
 
 Then show a single session concretely:
@@ -108,9 +108,9 @@ python3 tools/run_eval.py --agent pipeline --no-walk
 ```
 
 > "Because presentation is decoupled from ranking, one flag adapts the agent to whatever
-> interface it sits behind. Walk mode for voice and chat: 0.9693. Batched mode for a web grid,
-> where ten thumbnails cost the user nothing: 0.9571. And with every exposure mechanism off,
-> full top-ten on turn one: 0.9118.
+> interface it sits behind. Walk mode for voice and chat: 0.9707. Batched mode for a web grid,
+> where ten thumbnails cost the user nothing: 0.9580. And with every exposure mechanism off,
+> full top-ten on turn one: 0.9151.
 >
 > Identical retrieval and ranking in all three — Hit@10 is one-point-zero in every one. The
 > only thing that changes is how much of the ranking reaches the customer each turn. In a real
@@ -128,21 +128,26 @@ python3 tools/run_eval.py --agent pipeline --no-walk
 >
 > And the sharpest lesson came last week."
 
-**Screen:** README Pillar III, the two tables side by side.
+**Screen:** README Pillar III, scrolling through the three tables in order — pre-walk, the mismeasured reversal, and the corrected gated result.
 
 > "Aspect-level negative feedback — grounded in Bi et al., CIKM 2019 — replicated at plus
 > 0.017 across three independent held-out draws, two of which we had never tuned against. By
 > our own standards it had passed.
 >
-> Then a teammate landed the single-item walk, and we re-measured. It reversed to minus 0.006.
-> Hit@10 fell from 0.993 to 0.982 — it was losing eleven real targets per thousand sessions.
+> Then a teammate landed the single-item walk, and we re-measured. It appeared to reverse to
+> minus 0.006 — a rejection now penalises a single item's attributes instead of ten, and that
+> item is the target's nearest neighbour in our own ranking, so the mechanism plausibly turns
+> on itself.
 >
-> The reason is subtle: penalising a rejected item's attributes also penalises the target's
-> nearest neighbours, and with a one-item-per-turn walk, every rejection *is* a near neighbour.
-> Two sound mechanisms, mutually destructive.
+> That would have been the end of the story. It wasn't the right one. Checking it a third time,
+> we found the re-measurement itself was wrong — our own held-out harness was evaluating it
+> with the exposure gate off, while the public number it sat next to used the gate on. Fixed
+> and re-measured correctly, it's positive again — significant on two held-out draws, p under
+> 0.03 both times.
 >
-> An ablation is only valid against the baseline it was run on. So that flag ships off, and the
-> reversal is documented in the README rather than deleted."
+> An ablation is only valid against the baseline it was run on — that's the rule that caught
+> the first reversal. What we learned the second time is that the rule has to apply to your own
+> measurement code, not just the mechanism you're testing. It ships on now."
 
 ## 4:15 — 4:45 · Close
 
