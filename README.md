@@ -140,7 +140,7 @@ Where each pillar of the problem statement is implemented, and what it measured.
 | **II — question-value estimation** | seven selectable `--dialog` policies | **unrewardable**: `other` dominates by construction — see below |
 | **III — context distillation** | `distill.py` (`--distill`) | clean null across three draws |
 | **III — adaptive orchestration** | `agent.py` (`--no-repeat`) | +0.0028 held-out pre-signature; **zero effect under gated conditions** (identical to 4 decimals on all three draws — redundant with the walk's own turn-by-turn advancement); ships off |
-| **III — aspect-level negative feedback** | `agent.py` + `distill.py` (`--neg-aspects`, default **1.0**) | +0.017 pre-walk; a since-corrected ungated measurement wrongly showed −0.006; **verified +0.002 to +0.011 gated (p<0.03, two draws)** — ships **on** |
+| **III — aspect-level negative feedback** | `agent.py` + `distill.py` (`--neg-aspects`, default **1.0**) | +0.017 pre-walk; a since-corrected ungated measurement wrongly showed −0.006; **verified +0.002 to +0.011 gated (p<0.03, two draws)**, against −0.0004 on the public set — ships **on** |
 | **III — long-term memory** | `dialog.py::DynamicPolicy` (`--dialog dynamic`) | −0.008 public, −0.013 held-out |
 | **in-scope: slot decay over time** | *not implemented* | see [Limitations](#limitations--future-work) — the simulator's constraints cannot go stale |
 
@@ -328,13 +328,20 @@ distinct constraint coverage and before raw retriever score (`LocalReranker.rera
 it can reorder candidates already tied on coverage, never promote a lower-coverage one over a
 higher-coverage one.
 
-**Measured, current default vs. the same tree with this sort key removed:**
+**Measured as a paired ablation — the same tree with this sort key removed.** Both rows were
+run with `--neg-aspects 0`, the default at the time, so the delta below is a clean comparison
+of the tiebreak alone. The absolute numbers predate the `--neg-aspects` correction and are
+*not* the shipped score:
 
 | | public | held-out (seed 20260831, clean) |
 |---|---|---|
-| with signature tiebreak (shipped) | **0.971117** | **0.931545** |
+| with signature tiebreak | 0.971117 | 0.931545 |
 | without | 0.969342 | 0.930016 |
-| delta | +0.0018 | +0.0015 |
+| delta | **+0.0018** | **+0.0015** |
+
+The shipped default — this tiebreak **and** `--neg-aspects 1.0` — measures **0.970714** on the
+public set (verified 2026-09-01 on `8a84244`), which is the number in
+[Results](#results).
 
 Hit@10 is unchanged in both cases (1.000 / 0.978) — this mechanism finds no new targets, it
 only reorders sessions already tied on coverage.
