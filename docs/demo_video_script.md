@@ -18,9 +18,14 @@ earlier draft ran to six minutes of speech, which is how these overrun.
 | Linked in the Devpost description | Paste the URL into `docs/devpost_description.md` before submitting. |
 | No third-party trademarks or copyrighted content | No music, no logos, no stock footage. Product titles from the organizer's own catalog appear in output; that is inherent to demonstrating the solution on the provided dataset. |
 
-**Before recording:** pre-run each command once so the ~60 s index build is warm, then re-run on
-camera. Two terminals at 16pt+, repo open in VS Code, and **confirm no `ANTHROPIC_API_KEY` is
-visible on screen**.
+**Before recording.** Two terminals at 16pt+, repo open in VS Code, and **confirm no
+`ANTHROPIC_API_KEY` is visible on screen**.
+
+Index timing matters for the edit: there is **no cross-process cache**, so every command that
+constructs the agent pays the ~60 s LSA build again — pre-running does not make the on-camera
+run faster. Plan to cut that wait in the edit, or start each take once the build line has
+printed. The exception is `--routing`, which never builds the agent and returns in under a
+second, so it can be run live and uncut.
 
 ---
 
