@@ -1,178 +1,137 @@
 # Demo Video Script
 
-Target: **4–5 minutes**, screen recording with voiceover. No front-end exists, so this is the
+Target: **4:27**, screen recording with voiceover. No front-end exists, so this is the
 walkthrough format the brief explicitly permits for backend/NLP tracks ("API usage, inference
-examples, or result analysis").
+examples, or result analysis" — §4.5).
 
-**Requirements checklist:** upload to YouTube · set visibility **Public** · link in the Devpost
-description · no third-party trademarks or copyrighted music.
+Narration is **614 words**; the timestamps below are computed from that at 150 wpm plus command
+runtime, so they are what it will actually take. **Don't ad-lib past the script** — an
+earlier draft ran to six minutes of speech, which is how these overrun.
 
-**Before recording:** run `python3 tools/run_eval.py --agent pipeline` once so the index is
-warm and the 60 s build does not eat your runtime. Have a terminal with a readable font size
-(16pt+) and the repo open in VS Code.
+## Deliverables compliance (§4.5, item 3)
+
+| requirement | how this satisfies it |
+|---|---|
+| "Demonstrates your solution working end-to-end" | Three live runs, real command output rather than slides: routing across every scenario type (0:30), a full multi-turn session including an intent override (0:50), and the official evaluator over all 200 sessions (1:40). |
+| "Short video" | 4:27 |
+| Uploaded to YouTube, **public** visibility | Unlisted or private fails the requirement — set it to Public. |
+| Linked in the Devpost description | Paste the URL into `docs/devpost_description.md` before submitting. |
+| No third-party trademarks or copyrighted content | No music, no logos, no stock footage. Product titles from the organizer's own catalog appear in output; that is inherent to demonstrating the solution on the provided dataset. |
+
+**Before recording:** pre-run each command once so the ~60 s index build is warm, then re-run on
+camera. Two terminals at 16pt+, repo open in VS Code, and **confirm no `ANTHROPIC_API_KEY` is
+visible on screen**.
 
 ---
 
-## 0:00 — 0:30 · The problem, and the one insight
+## 0:00 — 0:36 · The problem, and the insight
 
-> "TechJam Track 4 asks for a conversational shopping agent: a customer describes what they
-> want, and the agent has ten turns to surface the exact product they had in mind out of a
-> fifty-thousand-item Amazon catalog.
+> "Shopping search breaks when the customer can't name what they want — so the agent has to ask,
+> and every wasted question loses them.
 >
-> We started by reading the evaluator line by line — and found the thing that reframed the
-> whole project. The constraints a customer discloses are drawn *verbatim from the target
-> product's own metadata*. When the simulated customer says '100% Leather', they are quoting a
-> field on the item we are trying to find."
+> This is Hazelnut, our agent for Track 4. Reading the evaluator line by line reframed the whole
+> project: the constraints a customer discloses are drawn **verbatim from the target product's
+> own metadata**. When they say '100% Leather', they're quoting a field on the item we're looking
+> for. So exact matching *identifies* the target, and semantic neighbours are the enemy —
+> plausible, wrong, and outranking the truth."
 
-**Screen:** `evaluator/local_evaluator.py`, scrolled to `materialize_hidden_fields`.
+**Screen:** `evaluator/local_evaluator.py` on `materialize_hidden_fields`, then cut to terminal.
 
-## 0:30 — 1:15 · Why that killed our first design
+## 0:36 — 1:03 · Live: dual-track routing (Pillar I)
 
-> "That inverts the obvious approach. Our first instinct — and our first implementation — was
-> dense semantic retrieval. But if the customer is quoting the target's metadata, then exact
-> matching *identifies* the item, and semantic neighbours are actively the enemy: they are
-> plausible, they are wrong, and they outrank the truth.
+```bash
+python3 tools/demo_session.py --routing
+```
+
+> "Pillar I wants dual-track routing. Intent lives in the *shape* of the opener, read before any
+> retrieval: a 'still exploring' tail is browsing, a 'key requirement' marker is buying, a bare
+> category-then-value opener is an override. Buying locks hard constraints; browsing opens the
+> dense route. A hundred percent accurate on intent and category across a thousand held-out
+> sessions."
+
+## 1:03 — 2:07 · Live: a full conversation (Pillar II)
+
+```bash
+python3 tools/demo_session.py --sample public_0002
+```
+
+> "A real scored session, turn by turn — the customer side is the evaluator's own simulator, not
+> a mock.
 >
-> We measured it instead of arguing about it. Fusing dense vectors into the ranking was
-> monotonically harmful at every weight we tried."
+> Turn one: routed, filtered to an exact category bucket, ranked by IDF-weighted constraint
+> coverage. Watch the question — it isn't scripted. The surviving candidates split between black
+> and brown, so it asks about *that*: Pillar II's proactive clarification, driven by whichever
+> facet actually divides the live pool.
+>
+> Turn two, slots accumulate and the target hits the top — but the evaluator won't count it yet,
+> because the override hasn't fired.
+>
+> Turn three, the customer changes their mind — the case that breaks naive state machines. The
+> agent acknowledges the switch and marks the old value inactive for the dialog, but keeps it as
+> retrieval evidence: erasing it outright measured six thousandths worse.
+>
+> Turn four: rank one."
 
-**Screen:** README "What We Tried and Rejected", the 0.8802 → 0.8464 line.
-
-> "So dense retrieval stayed — but only for the cold-start turn, before anything is disclosed.
-> That is the one place it beats popularity, and it is worth about a thousandth of a point.
-> Everything else is exact matching over an IDF-weighted constraint coverage score."
-
-## 1:15 — 2:15 · Live end-to-end run
-
-**Screen:** terminal. Type and run:
+## 2:07 — 2:38 · The numbers (Pillar IV)
 
 ```bash
 python3 tools/run_eval.py --agent pipeline
 ```
 
-> "This is the official evaluator, unmodified, on all two hundred public sessions. No LLM
-> calls, no network, no API key. One NumPy dependency."
-
-Let it finish; point at the output.
-
-> "Hit Rate at 10: one hundred percent. MRR: 0.996. Mean turns to conversion: 2.4.
-> TechnicalScore 0.9707 — against the organiser's BM25 baseline at 0.107. About nine times the
-> baseline, and the whole run takes under four seconds after the index build."
-
-Then show a single session concretely:
-
-```bash
-python3 -c "
-from agent import Agent
-a = Agent('data/catalog.jsonl')
-a.reset('demo', {})
-r = a.respond('demo', \"I'm looking for women's leather riding boots.\", turn=1, top_k=10)
-print(r['message']); print(r['ask_attribute']); print(r['recommendations'][:3])
-"
-```
-
-> "One turn, in isolation: it routes the intent, filters to the category bucket, ranks, and
-> asks about the attribute the surviving candidates most disagree on — that is the brief's
-> proactive clarification, driven by which facet actually splits the live pool."
-
-## 2:15 — 3:15 · Presentation policy as a design axis
-
-> "Now the design decision we think is the most interesting one in the system.
+> "The official evaluator, unmodified, all two hundred sessions. Hit Rate at 10: one hundred
+> percent. MRR 0.996. Mean turns to conversion 2.4. TechnicalScore **0.9707** against a BM25
+> baseline of 0.107 — nine times the baseline, and Pillar IV's three metrics all at once.
 >
-> Reading the evaluator closely, we found that rank is computed *within the list you return on
-> a given turn* — and that the scoring function pays 0.30 for MRR against only 0.02 for an
-> extra turn. Which means *how many* candidates you surface per turn is a real design decision
-> with a measurable cost, completely separate from how well you rank them.
+> It generalises: **0.9351** on a thousand-session held-out draw that informed no design decision
+> we made."
+
+## 2:38 — 3:26 · Presentation policy is a design axis
+
+> "The most interesting decision isn't in the ranker. Rank is scored *within the list you return
+> on a turn*, and MRR is weighted 0.30 against 0.02 per extra turn — so how much you surface is a
+> design decision, separate from how well you rank. So we decoupled them: the default walks the
+> ranking one candidate at a time, never re-offering something already passed on. Plus 0.012
+> held-out, sign test p near zero.
 >
-> So we decoupled the two. Ranking is one subsystem. The policy deciding how much of that
-> ranking to surface each turn is another."
+> And that's not just a scoring trick — a copilot on a voice assistant *cannot* return a ten-item
+> grid. One flag adapts the agent to its surface: 0.9707 walking, 0.9580 batched for a web grid,
+> 0.9151 with everything at once — identical retrieval in all three."
 
-**Screen:** README "Single-Item Walk Disclosure", showing the payoff table.
+**Screen:** README "Exposure Policy", three-mode comparison.
 
-> "Our default walks the ranking one strong candidate at a time — and never re-offers something
-> the customer has already passed on. So every turn shows the best *remaining* product. That is
-> what 'ordered best to worst' should mean inside a conversation.
+## 3:26 — 4:04 · Why you can trust the numbers (Pillar III)
+
+> "Most of what we believed turned out to be wrong. Four LLM reranking variants, all run live
+> against Claude — every one equal to or worse than a forty-line local reranker.
 >
-> And it mirrors how conversational commerce actually works. A shopping copilot on a voice
-> assistant, or in a chat thread, *cannot* hand back a ten-item grid. One candidate at a time
-> is the native unit there, not a compromise.
+> And our best Pillar III mechanism replicated at plus 0.017, then appeared to reverse, and we
+> nearly shipped it off. On the third check the reversal was *our own measurement bug*. Corrected,
+> it's positive and significant on two draws, and it ships on. An ablation is only valid against
+> the baseline it was run on — including when your own harness is what's wrong."
+
+## 4:04 — 4:27 · Close
+
+> "Every mechanism sits behind a flag with the draw it was measured on, including a dozen that
+> failed — all of it re-runs from the README.
 >
-> It costs us turns — mean turns to conversion rise from 2.26 to 2.41 — and we measured that
-> the trade is worth it: plus 0.012 on a held-out draw that informed no design decision, paired
-> sign test, p approximately zero."
+> One dependency. No GPU, no network, no credentials, eight milliseconds a turn. It runs on the
+> laptop it was built on, and it would run behind a real storefront tomorrow. Thanks for
+> watching."
 
-Now show the modes, running one live:
-
-```bash
-python3 tools/run_eval.py --agent pipeline --no-walk
-```
-
-> "Because presentation is decoupled from ranking, one flag adapts the agent to whatever
-> interface it sits behind. Walk mode for voice and chat: 0.9707. Batched mode for a web grid,
-> where ten thumbnails cost the user nothing: 0.9580. And with every exposure mechanism off,
-> full top-ten on turn one: 0.9151.
->
-> Identical retrieval and ranking in all three — Hit@10 is one-point-zero in every one. The
-> only thing that changes is how much of the ranking reaches the customer each turn. In a real
-> deployment you would pick the row that matches your surface."
-
-## 3:15 — 4:15 · Measurement discipline
-
-> "The reason we trust any of these numbers is that most of what we believed turned out to be
-> wrong.
->
-> Four LLM reranking variants — listwise, targeted, pairwise, pairwise-top-3 — all built, all
-> run live against Claude. Every single one measured equal to or worse than a forty-line local
-> reranker. When the customer is quoting the target's metadata, there is no semantic judgment
-> left to add.
->
-> And the sharpest lesson came last week."
-
-**Screen:** README Pillar III, scrolling through the three tables in order — pre-walk, the mismeasured reversal, and the corrected gated result.
-
-> "Aspect-level negative feedback — grounded in Bi et al., CIKM 2019 — replicated at plus
-> 0.017 across three independent held-out draws, two of which we had never tuned against. By
-> our own standards it had passed.
->
-> Then a teammate landed the single-item walk, and we re-measured. It appeared to reverse to
-> minus 0.006 — a rejection now penalises a single item's attributes instead of ten, and that
-> item is the target's nearest neighbour in our own ranking, so the mechanism plausibly turns
-> on itself.
->
-> That would have been the end of the story. It wasn't the right one. Checking it a third time,
-> we found the re-measurement itself was wrong — our own held-out harness was evaluating it
-> with the exposure gate off, while the public number it sat next to used the gate on. Fixed
-> and re-measured correctly, it's positive again — significant on two held-out draws, p under
-> 0.03 both times.
->
-> An ablation is only valid against the baseline it was run on — that's the rule that caught
-> the first reversal. What we learned the second time is that the rule has to apply to your own
-> measurement code, not just the mechanism you're testing. It ships on now."
-
-## 4:15 — 4:45 · Close
-
-> "Every mechanism we built sits behind a flag with the draw it was measured on — including
-> about a dozen that failed. Nothing here has to be taken on trust; all of it can be re-run.
->
-> Three point nine seconds for two hundred sessions. One dependency. No network, no
-> credentials, no GPU. And it generalises: 0.93 on a thousand-session held-out draw that
-> informed no design decision we made.
->
-> Thanks for watching."
-
-**Screen:** end on the README's "Coverage Against the Brief" table.
+**Screen:** end on README "Coverage Against the Brief".
 
 ---
 
 ## Recording notes
 
-- **Do not skip the 3:15–4:15 block.** The reversal story is the strongest evidence of
-  engineering judgment in the whole submission and it is what separates this from a
-  leaderboard entry.
-- In 2:15–3:15, keep all three mode numbers on screen. The argument lands *because* it is
-  concrete about the trade-off and about what the system scores in each mode — a judge who
-  spots the difference unprompted will weigh it far worse than one who is walked through it.
-- If you run long, cut the 0:30–1:15 dense-retrieval segment first; it is the least
-  load-bearing.
-- Say "Claude Opus 5" rather than showing any API key on screen. Check the terminal for a
-  visible `ANTHROPIC_API_KEY` before recording.
+- **The three live runs are the requirement.** §4.5 asks the video to demonstrate the solution
+  *working end-to-end*; a README walkthrough alone doesn't satisfy it. Everything else supports.
+- **Don't cut the 3:26 block.** Catching your own measurement bug is the strongest credibility signal
+  in the submission, and it costs 30 seconds.
+- Keep all three mode numbers on screen through the 2:38 block — a judge who spots that gap unprompted
+  weighs it far worse than one walked through it.
+- If you need it shorter, cut the `--routing` demo (0:36) — the conversation demo re-shows
+  routing implicitly, and it is the one block whose point survives being dropped.
+- Say "Claude Opus 5" rather than showing a key. The default path makes zero API calls.
+- `demo_session.py --scenario buying` converts in two turns if the override session runs long on
+  camera.
