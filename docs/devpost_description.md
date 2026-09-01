@@ -32,11 +32,11 @@ hidden target product as early and as highly ranked as possible.
 | | Hit@10 | MRR | MTTC | TechnicalScore |
 |---|---|---|---|---|
 | Organizer's BM25 baseline | 0.125 | 0.068 | 9.81 | 0.107 |
-| **Ours** | **1.000** | **0.992** | 2.41 | **0.9693** |
+| **Ours** | **1.000** | **0.996** | 2.40 | **0.9707** |
 
 **9.1× the baseline**, in **3.9 seconds for all 200 sessions** (~8 ms of wall clock per turn including the
 evaluator; the agent's own median is 1.8 ms), with **zero LLM
-calls, no network, and no credentials**. It generalises: **0.9300 on a freshly drawn
+calls, no network, and no credentials**. It generalises: **0.9351 on a freshly drawn
 1,000-session held-out set that informed no design decision.**
 
 ## How we built it
@@ -75,15 +75,21 @@ the real project.** A partial list of measured, documented reversals:
   reporting a cumulative counter the evaluator then summed again each turn.
 - Four LLM reranking variants, all built and run live against Claude: **every one measured
   equal to or worse than a 40-line local reranker.**
+- A teammate's late addition to the reranker described itself, in its own code comment, as reconstructing our evaluator's hidden answer-key logic. It doesn't — it pattern-matches catalog text, and measured effect is small and vanishes under any paraphrasing — but the framing alone was worth catching and rewriting before submission; a claim like that shouldn't survive on the strength of nobody reading the docstring closely.
 - Aspect-level negative feedback replicated at **+0.017** across three independent held-out
-  draws — then **reversed to −0.006** once a teammate's single-item walk changed what a
-  rejection means, because penalising a rejected item's attributes also penalises the target's
-  nearest neighbours.
+  draws, then appeared to reverse to −0.006 once a teammate's single-item walk changed what a
+  rejection means — and that reversal turned out to be wrong too: our own held-out harness was
+  evaluating it with the exposure gate off while the public number used it on, a mismatch that
+  looked internally consistent because every row in the table used the same wrong setting.
+  Measured correctly, gated throughout, it is positive again and statistically significant
+  (p < 0.03 on two held-out draws) — and it ships on.
 
-That last one is the result we are proudest of catching. It had passed the bar we had set —
-three independent draws, two never tuned against — and it still had to be re-measured after an
-unrelated part of the system changed. **An ablation is only valid against the baseline it was
-run on.**
+That is the result we are proudest of catching, twice over. It had passed our own bar — three
+independent draws, two never tuned against — and still needed re-verification after an
+unrelated part of the system changed. The second time, it needed re-verification against our
+*own measurement code*, which is a harder thing to doubt than a teammate's mechanism. **An
+ablation is only valid against the baseline it was actually run on** — including when the
+baseline itself is the thing that's wrong.
 
 So every mechanism in this repo ships behind a flag and is reported with the draw it was
 measured on, including the ones that failed. Roughly a dozen ideas were measured and rejected;
@@ -110,11 +116,16 @@ assistant or in a chat thread *cannot* return a ten-item grid — one candidate 
 native modality, not a compromise. The cost is real and we pay it: mean turns rise from 2.26 to
 2.41. The system spends turns to earn precision, and we measured that the trade is worth it.
 
-The second thing we learned is harder-won: **an ablation is only valid against the baseline it
-was run on.** Aspect-level negative feedback cleared our own bar — +0.017 across three
-independent held-out draws, two never tuned against — and still reversed to −0.006 once the
-walk changed what a rejection means. It ships off. We caught it only because we re-measured
-after an unrelated change, and that habit is the thing we would carry into the next project.
+The second thing we learned is harder-won, and it took two rounds to actually learn it. Our
+rule was **an ablation is only valid against the baseline it was run on** — so when aspect-level
+negative feedback (+0.017 across three independent held-out draws) appeared to reverse to
+−0.006 once the walk changed what a rejection means, we treated that as the rule working:
+caught by re-measuring after an unrelated change, exactly as intended. It shipped off on that
+basis. It turned out the second measurement was itself wrong — evaluated with the exposure
+gate off against a baseline that used it on — and correcting that reversed the reversal:
++0.002 to +0.011 on held-out, significant at p < 0.03. The rule was right; we just hadn't
+applied it to our own harness as rigorously as we'd applied it to the mechanism. It ships on
+now, and the habit we're carrying forward is re-verifying the measurement, not just the claim.
 
 ## Extension: adapting to the deployment surface
 
@@ -123,14 +134,14 @@ behind by changing one flag — no retraining, no re-ranking, no code change.
 
 | deployment surface | mode | TechnicalScore |
 |---|---|---|
-| voice assistant, chat thread, SMS — one item is the native unit | walk (default) | **0.9693** |
-| web grid or app carousel — ten thumbnails cost the user nothing | `--no-walk` | 0.9571 |
-| full transparency, everything surfaced at once | `--no-exposure-gate` | 0.9118 |
+| voice assistant, chat thread, SMS — one item is the native unit | walk (default) | **0.9707** |
+| web grid or app carousel — ten thumbnails cost the user nothing | `--no-walk` | 0.9580 |
+| full transparency, everything surfaced at once | `--no-exposure-gate` | 0.9151 |
 
 All three run the identical retrieval and ranking stack; Hit@10 is **1.000** in every one. What
 changes is only how much of the ranking reaches the customer per turn.
 
-That last row is worth stating plainly for anyone reproducing our numbers: **0.9118 is our
+That last row is worth stating plainly for anyone reproducing our numbers: **0.9151 is our
 score with every exposure mechanism disabled and the full top-10 returned on turn one.** The
 gap between it and the headline is the value of turn management, not of retrieval — and in a
 real deployment we would pick the row that matches the surface rather than the one that

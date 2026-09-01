@@ -25,7 +25,7 @@ def make_agent(name: str, catalog: str, use_prior: bool = True, use_dense: bool 
                reranker: str = "local", ranking_model: str | None = None,
                exposure_gate: bool = True, dialog: str = "integrated",
                erase_on_override: bool = False, distill: bool = False,
-               no_repeat: bool = False, neg_aspects: float = 0.0,
+               no_repeat: bool = False, neg_aspects: float = 1.0,
                tie_break_dense: bool = False, multi_route: bool = False,
                broad_pool: bool = False, len_norm: float = 0.0,
                walk: bool = True, rerank_pool: int = 10):
@@ -87,9 +87,12 @@ def main() -> None:
                                  "brain-simulator", "brain-fixed", "dynamic"),
                         help="question policy: wildcard is the placeholder baseline; "
                              "brain-* use pipeline/dialog.py (B)")
-    parser.add_argument("--neg-aspects", type=float, default=0.0,
+    parser.add_argument("--neg-aspects", type=float, default=1.0,
                         help="aspect-level negative feedback weight (Bi et al. "
-                             "CIKM 2019); 0 disables. Implies rejection tracking")
+                             "CIKM 2019). ON by default at 1.0; pass 0 to ablate. "
+                             "Verified positive under gated conditions (p<0.03 on "
+                             "two held-out draws) after an earlier ungated "
+                             "measurement wrongly showed it reversed; see README")
     parser.add_argument("--no-repeat", action="store_true",
                         help="Pillar III adaptive orchestration: demote candidates "
                              "already shown and rejected in this session; off by "
@@ -201,7 +204,7 @@ def main() -> None:
     suffix += "_erase" if args.erase_on_override else ""
     suffix += "_distill" if args.distill else ""
     suffix += "_norepeat" if args.no_repeat else ""
-    suffix += f"_neg{args.neg_aspects:g}" if args.neg_aspects else ""
+    suffix += f"_neg{args.neg_aspects:g}" if args.neg_aspects != 1.0 else ""
     suffix += "_tiebreak" if args.tie_break_dense else ""
     suffix += "_rrf" if args.rrf else ""
     suffix += "_broadpool" if args.broad_pool else ""

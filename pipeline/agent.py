@@ -452,7 +452,7 @@ class PipelineAgent:
         erase_on_override: bool = False, exposure_gate: bool = True,
         exposure: int = CONFIDENT_EXPOSURE, release_turn: int = RELEASE_TURN,
         distill: bool = False, no_repeat: bool = False,
-        neg_aspects: float = 0.0, tie_break_dense: bool = False,
+        neg_aspects: float = 1.0, tie_break_dense: bool = False,
         multi_route: bool = False, broad_pool: bool = False,
         len_norm: float = 0.0, walk: bool = True,
     ) -> None:
